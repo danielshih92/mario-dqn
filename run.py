@@ -63,7 +63,7 @@ def make_env():
     if isinstance(env, gym.wrappers.TimeLimit):
         env = env.env
 
-    env = StepAPICompatibility(env, output_truncation_bool=False)
+    env = StepAPICompatibility(env, new_step_api=False)
 
     movement = REDUCED_MOVEMENT if USE_REDUCED_ACTIONS else SIMPLE_MOVEMENT
     env = JoypadSpace(env, movement)
