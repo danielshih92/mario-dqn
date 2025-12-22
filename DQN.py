@@ -57,7 +57,8 @@ class DQN:
         if (not deterministic) and (np.random.rand() < self.epsilon):
             return np.random.randint(self.action_dim)
 
-        state_x = T.tensor([state], dtype=T.float32, device=self.device)
+        state_x = T.from_numpy(state).float().unsqueeze(0).to(self.device)
+
         with T.no_grad():
             q_values = self.q_net(state_x)  # shape: [1, action_dim]
             return int(T.argmax(q_values, dim=1).item())
