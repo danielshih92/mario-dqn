@@ -32,7 +32,7 @@ if isinstance(env, gym.wrappers.TimeLimit):
     env = env.env
 
 # 3) 固定成舊 step API（回 4-tuple）
-env = StepAPICompatibility(env, output_truncation_bool=False)
+env = StepAPICompatibility(env, new_step_api=False)
 
 # 4) 再包 JoypadSpace
 env = JoypadSpace(env, SIMPLE_MOVEMENT)
