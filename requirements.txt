@@ -1,7 +1,17 @@
+# Core numerical stack (pin to numpy < 2.0 for nes-py compatibility)
+numpy==1.26.4
+
+# Classic Gym stack (gym-super-mario-bros / nes-py are gym-based)
 gym==0.25.2
-gymnasium>=0.29.0
-gym-super-mario-bros==7.4.0
+
+# Mario environment
 nes-py==8.2.1
+gym-super-mario-bros==7.4.0
+
+# Utilities
 opencv-python
 tqdm
+
+# Deep learning (Colab usually has torch already, but pin is okay)
 torch
+
