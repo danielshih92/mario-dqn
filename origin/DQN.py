@@ -48,20 +48,17 @@ class DQN:
         return self.model(state_dim,action_dim).to(self.device)
     
     # action 選擇函數
-    def take_action(self, state, deterministic: bool = False):
-        """Select an action.
-
-        - deterministic=False: epsilon-greedy (explore with prob epsilon, otherwise greedy).
-        - deterministic=True: always greedy (argmax Q).
-        """
-        if (not deterministic) and (np.random.rand() < self.epsilon):
-            return np.random.randint(self.action_dim)
-
-        state_x = T.tensor([state], dtype=T.float32, device=self.device)
+    def take_action(self, state): 
+        # Exploration Unknown Policy(探索)
+        if np.random.rand() < self.epsilon:                                      # 產生一個隨機浮點數（介於 0 和 1 之間），如果這個數字小於 epsilon（探索的機率），則執行隨機動作
+            return np.random.randint(self.action_dim)                            # 生成一個在 [0, self.action_dim) 範圍內的隨機整數
+        
+        # Exploitation Known Policy(利用)                                        # 隨機浮點數大於 epsilon 執行根據推理的動作（利用）
+        state_x = T.tensor([state], dtype=T.float32, device=self.device)         # 單一 state 轉換為 PyTorch 張量
         with T.no_grad():
-            q_values = self.q_net(state_x)  # shape: [1, action_dim]
-            return int(T.argmax(q_values, dim=1).item())
-# 從類別分佈中抽樣一個動作，並返回對應的索引（即選擇的動作）
+            action_probs = F.softmax(self.q_net(state_x), dim=1)                 # 使用 [Q-net] 計算該 state 下每個動作的分數，並通過 softmax 將這些分數轉換為機率分佈
+            action_dist  = T.distributions.Categorical(action_probs)             # 將機率分佈轉換為一個類別分佈物件，方便後續從中抽樣
+            return action_dist.sample().item()                                   # 從類別分佈中抽樣一個動作，並返回對應的索引（即選擇的動作）
         
     #　損失函數計算
     def get_loss(self, states, actions, rewards, next_states, dones):
