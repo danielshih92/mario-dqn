@@ -102,15 +102,6 @@ def run_eval_episode(dqn: DQN, episode_idx: int):
         action = dqn.take_action(state, deterministic=True)
         next_state, env_reward, done, info = env.step(action)
 
-        # record frames for UI (video)
-        if RECORD_EVAL_VIDEO:
-            try:
-                frame = env.render(mode="rgb_array")
-                frames.append(frame.copy())
-            except Exception:
-                # If rgb_array is unavailable, skip recording
-                pass
-
         r = shaped_reward(info, env_reward, prev_info)
         total_reward += float(r)
         total_env_reward += float(env_reward)
