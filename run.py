@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import cv2
 from tqdm import tqdm
+import glob
 
 import gym
 import gym_super_mario_bros
@@ -35,16 +36,17 @@ EPS_DECAY_EPISODES = 1200      # linearly decay over first N episodes
 # Rendering / evaluation
 TRAIN_RENDER = False           # training render is slow; keep False
 EVAL_INTERVAL = 200 #500            # run an eval episode every N episodes
-RECORD_EVAL_VIDEO = True
-VIDEO_DIR = "/content/drive/MyDrive/mario/videos"
 MAX_EVAL_STEPS = 5000
 
 # Early stop if stuck
 MAX_STAGNATION_STEPS = 500
 
 SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
-BEST_VIDEO_NAME = "best_eval.mp4"
-SAVE_EVERY = 250               # save checkpoint every N episodes (in addition to best)
+SAVE_EVERY = 200               # save checkpoint every N episodes (in addition to best)
+
+EP_OFFSET = 500 # to keep track of actual episode number when resuming training
+RESUME = True
+RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best.pth"
 
 # Reduce action space (often helps early learning)
 USE_REDUCED_ACTIONS = True
@@ -80,18 +82,6 @@ def epsilon_by_episode(ep: int) -> float:
     return EPS_START + ratio * (EPS_END - EPS_START)
 
 
-def record_video(frames_rgb, out_path: str, fps: int = 30):
-    if not frames_rgb:
-        return
-    h, w, _ = frames_rgb[0].shape
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
-    for frame in frames_rgb:
-        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    writer.release()
-
-
 @torch.no_grad()
 def run_eval_episode(dqn: DQN, episode_idx: int):
     env = make_env()
@@ -116,7 +106,7 @@ def run_eval_episode(dqn: DQN, episode_idx: int):
         if RECORD_EVAL_VIDEO:
             try:
                 frame = env.render(mode="rgb_array")
-                frames.append(frame)
+                frames.append(frame.copy())
             except Exception:
                 # If rgb_array is unavailable, skip recording
                 pass
@@ -134,16 +124,10 @@ def run_eval_episode(dqn: DQN, episode_idx: int):
 
     env.close()
 
-    video_path = None
-    if RECORD_EVAL_VIDEO and frames:
-        video_path = os.path.join(VIDEO_DIR, f"eval_ep_{episode_idx}.mp4")
-        record_video(frames, video_path)
-
     return {
         "steps": steps,
         "total_shaped_reward": total_reward,
         "total_env_reward": total_env_reward,
-        "video_path": video_path,
     }
 
 
@@ -164,6 +148,11 @@ def main():
         target_update=TARGET_UPDATE,
         device=device,
     )
+    if RESUME and os.path.exists(RESUME_PATH):
+        print(f"[RESUME] loading model from {RESUME_PATH}")
+        dqn.q_net.load_state_dict(torch.load(RESUME_PATH))
+        dqn.epsilon = 0.3
+
     memory = ReplayMemory(MEMORY_SIZE)
 
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -172,6 +161,7 @@ def main():
     global_step = 0
 
     for ep in tqdm(range(1, TOTAL_EPISODES + 1), desc="Training"):
+        effective_ep = EP_OFFSET + ep
         state = env.reset()
         state = preprocess_frame(state)
         state = np.expand_dims(state, axis=0)
@@ -180,7 +170,7 @@ def main():
         prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
         stagnation = 0
 
-        dqn.epsilon = epsilon_by_episode(ep)
+        dqn.epsilon = epsilon_by_episode(effective_ep)
 
         ep_env_reward = 0.0
         ep_shaped_reward = 0.0
@@ -227,15 +217,15 @@ def main():
                 env.render()
 
         # periodic save
-        if ep % SAVE_EVERY == 0:
-            ckpt_path = os.path.join(SAVE_DIR, f"ep_{ep}.pth")
+        if effective_ep % SAVE_EVERY == 0:
+            ckpt_path = os.path.join(SAVE_DIR, f"ep_{effective_ep}.pth")
             torch.save(dqn.q_net.state_dict(), ckpt_path)
 
         # periodic evaluation (with optional video)
-        if ep % EVAL_INTERVAL == 0:
-            eval_stats = run_eval_episode(dqn, ep)
+        if effective_ep % EVAL_INTERVAL == 0:
+            eval_stats = run_eval_episode(dqn, effective_ep)
             print(
-                f"[EVAL ep={ep}] steps={eval_stats['steps']} "
+                f"[EVAL ep={effective_ep}] steps={eval_stats['steps']} "
                 f"env_reward={eval_stats['total_env_reward']:.1f} "
                 f"shaped_reward={eval_stats['total_shaped_reward']:.1f} "
                 f"video={eval_stats['video_path']}"
@@ -244,8 +234,23 @@ def main():
             # keep best
             if eval_stats["total_env_reward"] > best_eval_score:
                 best_eval_score = eval_stats["total_env_reward"]
+
+                # 1) 先刪掉舊的 best_*.pth
+                for old in glob.glob(os.path.join(SAVE_DIR, "best_*.pth")):
+                    try:
+                        os.remove(old)
+                    except OSError:
+                        pass
+
+                # 2) 存新的 best_{episode}.pth（episode 用「實際總回合」命名，下面第3點會處理 offset）
+                best_tag_path = os.path.join(SAVE_DIR, f"best_{effective_ep}.pth")
+                torch.save(dqn.q_net.state_dict(), best_tag_path)
+
+                # 3) 同步存一份固定檔名 best.pth，方便下次 RESUME
                 best_path = os.path.join(SAVE_DIR, "best.pth")
                 torch.save(dqn.q_net.state_dict(), best_path)
+
+                print(f"[BEST] new best saved: {best_tag_path}")
 
         print(
             f"[TRAIN ep={ep}] eps={dqn.epsilon:.3f} "
