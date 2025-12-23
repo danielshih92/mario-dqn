@@ -25,7 +25,7 @@ BATCH_SIZE = 32
 GAMMA = 0.99
 MEMORY_SIZE = 50_000
 TARGET_UPDATE = 2_000          # in gradient steps
-TOTAL_EPISODES = 2000
+TOTAL_EPISODES = 1000 #2000
 
 # Exploration schedule
 EPS_START = 1.0
@@ -34,15 +34,16 @@ EPS_DECAY_EPISODES = 1200      # linearly decay over first N episodes
 
 # Rendering / evaluation
 TRAIN_RENDER = False           # training render is slow; keep False
-EVAL_INTERVAL = 500            # run an eval episode every N episodes
+EVAL_INTERVAL = 200 #500            # run an eval episode every N episodes
 RECORD_EVAL_VIDEO = True
-VIDEO_DIR = "videos"
+VIDEO_DIR = "/content/drive/MyDrive/mario/videos"
 MAX_EVAL_STEPS = 5000
 
 # Early stop if stuck
 MAX_STAGNATION_STEPS = 500
 
-SAVE_DIR = "ckpt_test"
+SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
+BEST_VIDEO_NAME = "best_eval.mp4"
 SAVE_EVERY = 250               # save checkpoint every N episodes (in addition to best)
 
 # Reduce action space (often helps early learning)
