@@ -26,7 +26,7 @@ BATCH_SIZE = 32
 GAMMA = 0.99
 MEMORY_SIZE = 50_000
 TARGET_UPDATE = 2_000          # in gradient steps
-TOTAL_EPISODES = 1000 #2000
+TOTAL_EPISODES = 3500 #2000
 
 # Exploration schedule
 EPS_START = 1.0
@@ -35,7 +35,7 @@ EPS_DECAY_EPISODES = 1200      # linearly decay over first N episodes
 
 # Rendering / evaluation
 TRAIN_RENDER = False           # training render is slow; keep False
-EVAL_INTERVAL = 200 #500            # run an eval episode every N episodes
+EVAL_INTERVAL = 100 #500            # run an eval episode every N episodes
 MAX_EVAL_STEPS = 5000
 
 # Early stop if stuck
@@ -44,9 +44,9 @@ MAX_STAGNATION_STEPS = 500
 SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
 SAVE_EVERY = 200               # save checkpoint every N episodes (in addition to best)
 
-EP_OFFSET = 500 # to keep track of actual episode number when resuming training
+EP_OFFSET = 1500 # to keep track of actual episode number when resuming training
 RESUME = True
-RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best.pth"
+RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_800.pth"
 
 # Reduce action space (often helps early learning)
 USE_REDUCED_ACTIONS = True
