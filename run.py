@@ -219,7 +219,6 @@ def main():
                 f"[EVAL ep={effective_ep}] steps={eval_stats['steps']} "
                 f"env_reward={eval_stats['total_env_reward']:.1f} "
                 f"shaped_reward={eval_stats['total_shaped_reward']:.1f} "
-                f"video={eval_stats['video_path']}"
             )
 
             # keep best
