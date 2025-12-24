@@ -35,7 +35,7 @@ EPS_DECAY_EPISODES = 1200      # linearly decay over first N episodes
 
 # Rendering / evaluation
 TRAIN_RENDER = False           # training render is slow; keep False
-EVAL_INTERVAL = 100 #500            # run an eval episode every N episodes
+EVAL_INTERVAL = 50 #500            # run an eval episode every N episodes
 MAX_EVAL_STEPS = 5000
 
 # Early stop if stuck
@@ -44,9 +44,9 @@ MAX_STAGNATION_STEPS = 500
 SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
 SAVE_EVERY = 200               # save checkpoint every N episodes (in addition to best)
 
-EP_OFFSET = 1500 # to keep track of actual episode number when resuming training
+EP_OFFSET = 2300 # to keep track of actual episode number when resuming training
 RESUME = True
-RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_800.pth"
+RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_2300.pth"
 
 # Reduce action space (often helps early learning)
 USE_REDUCED_ACTIONS = True
