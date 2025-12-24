@@ -44,12 +44,16 @@ def forward_progress_reward(info, reward, prev_info,
         r -= backtrack_penalty * abs(dx)
     return r, dx  # return dx for later use (e.g., forward-jump gating)
 
-def stagnation_penalty_reward(dx, reward,
-                              stagnation_penalty: float = 0.08):
-    """Harsh penalty when not making horizontal progress (dx==0)."""
+def stagnation_penalty_reward(dx, reward, stagnation_count: int = 0,
+                              base_penalty: float = 0.04,
+                              growth_per_step: float = 0.02,
+                              max_penalty: float = 1.0):
+    """Cumulative penalty when not making horizontal progress (dx==0)."""
     r = reward
     if dx == 0:
-        r -= stagnation_penalty
+        penalty = base_penalty + growth_per_step * max(0, int(stagnation_count))
+        penalty = min(penalty, max_penalty)
+        r -= penalty
     return r
 
 def forward_jump_reward(info, reward, prev_info, dx,
@@ -75,7 +79,7 @@ def coin_reward(info, reward, prev_info, coin_weight: float = 2.0):
     dcoins = coins - pcoins
     return reward + coin_weight * dcoins
 
-def score_reward(info, reward, prev_info, score_weight: float = 0.002):
+def score_reward(info, reward, prev_info, score_weight: float = 0.01):
     """Small bonus for increasing in-game score (often enemies/items)."""
     score = float(_get(info, "score", 0))
     pscore = float(_get(prev_info, "score", score))
@@ -89,8 +93,8 @@ def time_penalty_reward(reward, per_step_penalty: float = 0.02):
     return reward - per_step_penalty
 
 def damage_death_penalty_reward(info, reward, prev_info,
-                                life_drop_penalty: float = 50.0,
-                                status_drop_penalty: float = 25.0):
+                                life_drop_penalty: float = 15.0,
+                                status_drop_penalty: float = 10.0):
     """Heavily punish getting hurt or losing a life."""
     r = reward
 
@@ -118,7 +122,7 @@ def final_flag_reward(info, reward, flag_bonus: float = 500.0):
     flag_get = bool(_get(info, "flag_get", False))
     return reward + (flag_bonus if flag_get else 0.0)
 
-def shaped_reward(info, env_reward, prev_info):
+def shaped_reward(info, env_reward, prev_info, stagnation_count: int = 0):
     """Apply all shaping in a single call (aggressive, fast-clear)."""
     r = float(env_reward)
 
@@ -126,7 +130,7 @@ def shaped_reward(info, env_reward, prev_info):
     r, dx = forward_progress_reward(info, r, prev_info)
 
     # 2) Break pipe-stuck behavior
-    r = stagnation_penalty_reward(dx, r)
+    r = stagnation_penalty_reward(dx, r, stagnation_count)
 
     # 3) Encourage forward jump, not pogo jumping
     r = forward_jump_reward(info, r, prev_info, dx)

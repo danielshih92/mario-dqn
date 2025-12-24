@@ -30,7 +30,7 @@ TOTAL_EPISODES = 3500 #2000
 
 # Exploration schedule
 EPS_START = 1.0
-EPS_END = 0.05
+EPS_END = 0.1
 EPS_DECAY_EPISODES = 1200      # linearly decay over first N episodes
 
 # Rendering / evaluation
@@ -89,6 +89,7 @@ def run_eval_episode(dqn: DQN, episode_idx: int):
     state = env.reset()
     done = False
     prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
+    stagnation = 0
 
     state = preprocess_frame(state)
     state = np.expand_dims(state, axis=0)
@@ -102,7 +103,12 @@ def run_eval_episode(dqn: DQN, episode_idx: int):
         action = dqn.take_action(state, deterministic=True)
         next_state, env_reward, done, info = env.step(action)
 
-        r = shaped_reward(info, env_reward, prev_info)
+        if info.get("x_pos", 0) == prev_info.get("x_pos", 0):
+            stagnation += 1
+        else:
+            stagnation = 0
+
+        r = shaped_reward(info, env_reward, prev_info, stagnation)
         total_reward += float(r)
         total_env_reward += float(env_reward)
 
@@ -170,19 +176,19 @@ def main():
             action = dqn.take_action(state, deterministic=False)
             next_state, env_reward, done, info = env.step(action)
 
-            # shaped reward
-            r = shaped_reward(info, env_reward, prev_info)
-
-            ep_env_reward += float(env_reward)
-            ep_shaped_reward += float(r)
-
-            # stagnation early stop
+            # update stagnation first (used for cumulative penalty and early stop)
             if info.get("x_pos", 0) == prev_info.get("x_pos", 0):
                 stagnation += 1
                 if stagnation >= MAX_STAGNATION_STEPS:
                     done = True
             else:
                 stagnation = 0
+
+            # shaped reward (with cumulative stagnation penalty)
+            r = shaped_reward(info, env_reward, prev_info, stagnation)
+
+            ep_env_reward += float(env_reward)
+            ep_shaped_reward += float(r)
 
             prev_info = dict(info)
 
