@@ -46,7 +46,7 @@ def forward_progress_reward(info, reward, prev_info,
 
 def stagnation_penalty_reward(dx, reward, stagnation_count: int = 0,
                               base_penalty: float = 0.04,
-                              growth_per_step: float = 0.02,
+                              growth_per_step: float = 0.08,
                               max_penalty: float = 1.0):
     """Cumulative penalty when not making horizontal progress (dx==0)."""
     r = reward

@@ -30,7 +30,7 @@ TOTAL_EPISODES = 1200 #2000
 
 # Exploration schedule
 EPS_START = 1.0
-EPS_END = 0.1
+EPS_END = 0.15
 EPS_DECAY_EPISODES = 1200      # linearly decay over first N episodes
 
 # Rendering / evaluation
@@ -44,9 +44,9 @@ MAX_STAGNATION_STEPS = 500
 SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
 SAVE_EVERY = 200               # save checkpoint every N episodes (in addition to best)
 
-EP_OFFSET = 2700 # to keep track of actual episode number when resuming training
+EP_OFFSET = 3400 # to keep track of actual episode number when resuming training
 RESUME = True
-RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_2700.pth"
+RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_3400.pth"
 
 # Reduce action space (often helps early learning)
 USE_REDUCED_ACTIONS = True
