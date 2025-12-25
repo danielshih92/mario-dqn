@@ -26,7 +26,7 @@ BATCH_SIZE = 32
 GAMMA = 0.99
 MEMORY_SIZE = 50_000
 TARGET_UPDATE = 2_000          # in gradient steps
-TOTAL_EPISODES = 3500 #2000
+TOTAL_EPISODES = 1200 #2000
 
 # Exploration schedule
 EPS_START = 1.0
