@@ -22,16 +22,16 @@ from DQN import DQN, ReplayMemory
 ENV_ID = "SuperMarioBros-1-1-v0"
 
 LR = 1e-4
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 GAMMA = 0.99
-MEMORY_SIZE = 50_000
+MEMORY_SIZE = 100_000
 TARGET_UPDATE = 2_000          # in gradient steps
-TOTAL_EPISODES = 1200 #2000
+TOTAL_EPISODES = 5000 #2000
 
 # Exploration schedule
 EPS_START = 1.0
-EPS_END = 0.15
-EPS_DECAY_EPISODES = 1200      # linearly decay over first N episodes
+EPS_END = 0.05
+EPS_DECAY_EPISODES = 3000      # linearly decay over first N episodes
 
 # Rendering / evaluation
 TRAIN_RENDER = False           # training render is slow; keep False
@@ -45,7 +45,7 @@ SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
 SAVE_EVERY = 200               # save checkpoint every N episodes (in addition to best)
 
 EP_OFFSET = 3400 # to keep track of actual episode number when resuming training
-RESUME = True
+RESUME = False
 RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_3400.pth"
 
 # Reduce action space (often helps early learning)

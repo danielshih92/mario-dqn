@@ -79,7 +79,7 @@ def coin_reward(info, reward, prev_info, coin_weight: float = 2.0):
     dcoins = coins - pcoins
     return reward + coin_weight * dcoins
 
-def score_reward(info, reward, prev_info, score_weight: float = 0.01):
+def score_reward(info, reward, prev_info, score_weight: float = 0.05):
     """Small bonus for increasing in-game score (often enemies/items)."""
     score = float(_get(info, "score", 0))
     pscore = float(_get(prev_info, "score", score))
