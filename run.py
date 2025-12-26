@@ -57,7 +57,7 @@ class SkipFrame(new_gym.Wrapper):
 def make_env(env_id, rank, seed=0):
     def _init():
         # 1. 建立原始環境 (Old Gym)
-        env = gym_super_mario_bros.make(env_id, apply_api_compatibility=True)
+        env = gym_super_mario_bros.make(env_id)
         env = JoypadSpace(env, REDUCED_MOVEMENT)
         
         # 2. 透過 shimmy 轉換成 Gymnasium
