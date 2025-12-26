@@ -18,17 +18,14 @@
 # Core
 
 # version 0.1.1
-numpy
-torch
-tqdm
-
-# Environment
+numpy==1.26.4
 gym==0.26.2
 gym-super-mario-bros==7.4.0
 nes-py==8.2.1
+opencv-python-headless
+tqdm
+torch
 
-# Image processing
-opencv-python
 
 
 # version 0.2.0
