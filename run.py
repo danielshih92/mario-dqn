@@ -1,76 +1,55 @@
 import os
 import time
+import glob
 import numpy as np
 import torch
-import cv2
 from tqdm import tqdm
-import glob
 
-import gym
-import gym_super_mario_bros
-from nes_py.wrappers import JoypadSpace
-from gym.wrappers import StepAPICompatibility
-from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
-
-from utils import preprocess_frame
+from utils import make_mario_env
 from reward import shaped_reward
-from model import CustomCNN
-from DQN import DQN, ReplayMemory
+from model import DuelingCNN
+from DQN import DQNAgent, ReplayMemory
 
 
 # ===================== Config =====================
 ENV_ID = "SuperMarioBros-1-1-v0"
 
-LR = 1e-4
-BATCH_SIZE = 32
-GAMMA = 0.99
-MEMORY_SIZE = 50_000
-TARGET_UPDATE = 2_000          # in gradient steps
-TOTAL_EPISODES = 3500 #2000
+STACK_K = 4
+FRAME_SKIP = 4
+REDUCED_ACTIONS = True
 
-# Exploration schedule
+LR = 1e-4
+GAMMA = 0.99
+
+MEMORY_SIZE = 100_000
+BATCH_SIZE = 256
+WARMUP_STEPS = 10_000          # collect experience before learning
+
+TARGET_UPDATE_STEPS = 5_000    # sync target network every N gradient steps
+GRAD_CLIP = 10.0
+
+TOTAL_EPISODES = 2000
+MAX_STEPS_PER_EP = 5000        # safety cap
+
+# epsilon schedule (fast decay)
 EPS_START = 1.0
 EPS_END = 0.05
-EPS_DECAY_EPISODES = 1200      # linearly decay over first N episodes
+EPS_DECAY_EPISODES = 200       # decay quickly to reduce training time
 
-# Rendering / evaluation
-TRAIN_RENDER = False           # training render is slow; keep False
-EVAL_INTERVAL = 50 #500            # run an eval episode every N episodes
+# early stop if stuck
+MAX_STAGNATION_STEPS = 400
+
+# evaluation
+EVAL_INTERVAL = 50
 MAX_EVAL_STEPS = 5000
 
-# Early stop if stuck
-MAX_STAGNATION_STEPS = 500
-
+# checkpoints (Google Drive path)
 SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
-SAVE_EVERY = 200               # save checkpoint every N episodes (in addition to best)
+SAVE_EVERY = 200               # periodic checkpoint
+BEST_NAME = "best.pth"
 
-EP_OFFSET = 2300 # to keep track of actual episode number when resuming training
-RESUME = True
-RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_2300.pth"
-
-# Reduce action space (often helps early learning)
-USE_REDUCED_ACTIONS = True
-REDUCED_MOVEMENT = [
-    ["NOOP"],
-    ["right"],
-    ["right", "A"],
-    ["right", "B"],
-    ["right", "A", "B"],
-]
-
-
-def make_env():
-    env = gym_super_mario_bros.make(ENV_ID)
-
-    # Unwrap TimeLimit if present (StepAPICompatibility expects older API)
-    if isinstance(env, gym.wrappers.TimeLimit):
-        env = env.env
-
-    env = StepAPICompatibility(env, new_step_api=False)
-
-    movement = REDUCED_MOVEMENT if USE_REDUCED_ACTIONS else SIMPLE_MOVEMENT
-    env = JoypadSpace(env, movement)
-    return env
+RESUME = False
+RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best.pth"
 
 
 def epsilon_by_episode(ep: int) -> float:
@@ -83,97 +62,95 @@ def epsilon_by_episode(ep: int) -> float:
 
 
 @torch.no_grad()
-def run_eval_episode(dqn: DQN, episode_idx: int):
-    env = make_env()
-    frames = []
-    state = env.reset()
+def run_eval(agent: DQNAgent, episode_idx: int):
+    env = make_mario_env(ENV_ID, stack_k=STACK_K, skip=FRAME_SKIP, reduced_actions=REDUCED_ACTIONS)
+    obs = env.reset()
     done = False
-    prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
-
-    state = preprocess_frame(state)
-    state = np.expand_dims(state, axis=0)
-
-    total_reward = 0.0
-    total_env_reward = 0.0
     steps = 0
 
+    prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
+    total_env_reward = 0.0
+    total_shaped_reward = 0.0
+
     while (not done) and (steps < MAX_EVAL_STEPS):
-        # deterministic greedy action
-        action = dqn.take_action(state, deterministic=True)
-        next_state, env_reward, done, info = env.step(action)
+        agent.epsilon = 0.0
+        action = agent.act(obs, deterministic=True)
+        next_obs, env_r, done, info = env.step(action)
 
-        r = shaped_reward(info, env_reward, prev_info)
-        total_reward += float(r)
-        total_env_reward += float(env_reward)
-
+        r = shaped_reward(info, env_r, prev_info)
         prev_info = dict(info)
 
-        next_state = preprocess_frame(next_state)
-        next_state = np.expand_dims(next_state, axis=0)
-        state = next_state
+        total_env_reward += float(env_r)
+        total_shaped_reward += float(r)
+
+        obs = next_obs
         steps += 1
 
     env.close()
-
     return {
         "steps": steps,
-        "total_shaped_reward": total_reward,
-        "total_env_reward": total_env_reward,
+        "env_reward": total_env_reward,
+        "shaped_reward": total_shaped_reward,
+        "flag_get": bool(prev_info.get("flag_get", False)),
+        "x_pos": int(prev_info.get("x_pos", 0)),
     }
 
 
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = make_env()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("[Device]", device)
 
-    obs_shape = (1, 84, 84)
+    # make train env
+    env = make_mario_env(ENV_ID, stack_k=STACK_K, skip=FRAME_SKIP, reduced_actions=REDUCED_ACTIONS)
+
+    obs_shape = (STACK_K, 84, 84)
     n_actions = env.action_space.n
+    print("[Env] actions =", n_actions, "obs_shape =", obs_shape)
 
-    dqn = DQN(
-        model=CustomCNN,
+    agent = DQNAgent(
+        model_cls=DuelingCNN,
         state_dim=obs_shape,
         action_dim=n_actions,
-        learning_rate=LR,
+        lr=LR,
         gamma=GAMMA,
-        epsilon=EPS_START,
-        target_update=TARGET_UPDATE,
+        target_update_steps=TARGET_UPDATE_STEPS,
         device=device,
+        grad_clip=GRAD_CLIP,
     )
+
     if RESUME and os.path.exists(RESUME_PATH):
-        print(f"[RESUME] loading model from {RESUME_PATH}")
-        dqn.q_net.load_state_dict(torch.load(RESUME_PATH))
-        dqn.epsilon = 0.3
+        print(f"[RESUME] loading from {RESUME_PATH}")
+        agent.load(RESUME_PATH)
+        agent.epsilon = 0.2
 
     memory = ReplayMemory(MEMORY_SIZE)
-
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    best_eval_score = -1e18
-    global_step = 0
+    best_score = -1e18
+    global_env_steps = 0
+    global_updates = 0
 
+    # warmup prev_info (per episode)
     for ep in tqdm(range(1, TOTAL_EPISODES + 1), desc="Training"):
-        effective_ep = EP_OFFSET + ep
-        state = env.reset()
-        state = preprocess_frame(state)
-        state = np.expand_dims(state, axis=0)
+        agent.epsilon = epsilon_by_episode(ep)
 
+        obs = env.reset()
         done = False
+        steps = 0
+
         prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
         stagnation = 0
 
-        dqn.epsilon = epsilon_by_episode(effective_ep)
-
         ep_env_reward = 0.0
         ep_shaped_reward = 0.0
+        ep_losses = []
 
-        while not done:
-            action = dqn.take_action(state, deterministic=False)
-            next_state, env_reward, done, info = env.step(action)
+        while (not done) and (steps < MAX_STEPS_PER_EP):
+            action = agent.act(obs, deterministic=False)
+            next_obs, env_r, done, info = env.step(action)
 
-            # shaped reward
-            r = shaped_reward(info, env_reward, prev_info)
-
-            ep_env_reward += float(env_reward)
+            r = shaped_reward(info, env_r, prev_info)
+            ep_env_reward += float(env_r)
             ep_shaped_reward += float(r)
 
             # stagnation early stop
@@ -186,65 +163,56 @@ def main():
 
             prev_info = dict(info)
 
-            next_state_proc = preprocess_frame(next_state)
-            next_state_proc = np.expand_dims(next_state_proc, axis=0)
+            memory.push(obs, action, r, next_obs, done)
+            obs = next_obs
 
-            memory.push(state, action, r, next_state_proc, done)
-            state = next_state_proc
+            global_env_steps += 1
+            steps += 1
 
-            if len(memory) >= BATCH_SIZE:
+            # learn after warmup and when enough samples
+            if (global_env_steps > WARMUP_STEPS) and (len(memory) >= BATCH_SIZE):
                 batch = memory.sample(BATCH_SIZE)
-                state_dict = {
-                    "states": batch[0],
-                    "actions": batch[1],
-                    "rewards": batch[2],
-                    "next_states": batch[3],
-                    "dones": batch[4],
-                }
-                dqn.train_per_step(state_dict)
-                global_step += 1
+                loss = agent.learn(batch)
+                ep_losses.append(loss)
+                global_updates += 1
 
-            if TRAIN_RENDER:
-                env.render()
+        avg_loss = float(np.mean(ep_losses)) if ep_losses else 0.0
 
         # periodic save
-        if effective_ep % SAVE_EVERY == 0:
-            ckpt_path = os.path.join(SAVE_DIR, f"ep_{effective_ep}.pth")
-            torch.save(dqn.q_net.state_dict(), ckpt_path)
+        if ep % SAVE_EVERY == 0:
+            ckpt_path = os.path.join(SAVE_DIR, f"ep_{ep}.pth")
+            agent.save(ckpt_path)
 
-        # periodic evaluation (with optional video)
-        if effective_ep % EVAL_INTERVAL == 0:
-            eval_stats = run_eval_episode(dqn, effective_ep)
+        # evaluation
+        if ep % EVAL_INTERVAL == 0:
+            stats = run_eval(agent, ep)
             print(
-                f"[EVAL ep={effective_ep}] steps={eval_stats['steps']} "
-                f"env_reward={eval_stats['total_env_reward']:.1f} "
-                f"shaped_reward={eval_stats['total_shaped_reward']:.1f} "
+                f"[EVAL ep={ep}] steps={stats['steps']} "
+                f"x={stats['x_pos']} flag={stats['flag_get']} "
+                f"envR={stats['env_reward']:.1f} shapedR={stats['shaped_reward']:.1f}"
             )
 
-            # keep best
-            if eval_stats["total_env_reward"] > best_eval_score:
-                best_eval_score = eval_stats["total_env_reward"]
+            # keep best by env reward (you can also use x_pos / flag_get)
+            score = stats["env_reward"]
+            if score > best_score:
+                best_score = score
 
-                # 1) 先刪掉舊的 best_*.pth
+                # remove old best_*.pth
                 for old in glob.glob(os.path.join(SAVE_DIR, "best_*.pth")):
                     try:
                         os.remove(old)
                     except OSError:
                         pass
 
-                # 2) 存新的 best_{episode}.pth（episode 用「實際總回合」命名，下面第3點會處理 offset）
-                best_tag_path = os.path.join(SAVE_DIR, f"best_{effective_ep}.pth")
-                torch.save(dqn.q_net.state_dict(), best_tag_path)
-
-                # 3) 同步存一份固定檔名 best.pth，方便下次 RESUME
-                best_path = os.path.join(SAVE_DIR, "best.pth")
-                torch.save(dqn.q_net.state_dict(), best_path)
-
-                print(f"[BEST] new best saved: {best_tag_path}")
+                best_tag = os.path.join(SAVE_DIR, f"best_{ep}.pth")
+                agent.save(best_tag)
+                agent.save(os.path.join(SAVE_DIR, BEST_NAME))
+                print(f"[BEST] saved: {best_tag}")
 
         print(
-            f"[TRAIN ep={ep}] eps={dqn.epsilon:.3f} "
-            f"env_reward={ep_env_reward:.1f} shaped_reward={ep_shaped_reward:.1f}"
+            f"[TRAIN ep={ep}] eps={agent.epsilon:.3f} "
+            f"envR={ep_env_reward:.1f} shapedR={ep_shaped_reward:.1f} "
+            f"avgLoss={avg_loss:.4f} mem={len(memory)}"
         )
 
     env.close()
