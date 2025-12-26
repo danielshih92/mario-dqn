@@ -7,7 +7,8 @@ from nes_py.wrappers import JoypadSpace
 
 # 新的 gymnasium (給 SB3 用)
 import gymnasium as new_gym
-from gymnasium.wrappers import ResizeObservation, GrayScaleObservation
+# 【修正】這裡改成 GrayscaleObservation (小寫 s)
+from gymnasium.wrappers import ResizeObservation, GrayscaleObservation
 import shimmy
 
 # Stable Baselines3
@@ -21,10 +22,9 @@ ENV_ID = "SuperMarioBros-1-1-v0"
 SAVE_DIR = "ckpt_ppo"
 TOTAL_TIMESTEPS = 2_000_000
 LEARNING_RATE = 2.5e-4
-N_ENVS = 4                  # 若 T4 記憶體不夠，可降為 4；若夠可改回 8
+N_ENVS = 4                  
 SAVE_FREQ = 50_000
 
-# 還原你的自定義動作 (5 actions)
 REDUCED_MOVEMENT = [
     ["NOOP"],
     ["right"],
@@ -35,9 +35,6 @@ REDUCED_MOVEMENT = [
 
 # ================= Wrappers =================
 class SkipFrame(new_gym.Wrapper):
-    """
-    繼承自 gymnasium.Wrapper
-    """
     def __init__(self, env, skip=4):
         super().__init__(env)
         self._skip = skip
@@ -48,7 +45,6 @@ class SkipFrame(new_gym.Wrapper):
         truncated = False
         
         for i in range(self._skip):
-            # Gymnasium 的 step 回傳 5 個值: obs, reward, terminated, truncated, info
             obs, reward, term, trunc, info = self.env.step(action)
             total_reward += reward
             if term or trunc:
@@ -64,16 +60,15 @@ def make_env(env_id, rank, seed=0):
         env = gym_super_mario_bros.make(env_id, apply_api_compatibility=True)
         env = JoypadSpace(env, REDUCED_MOVEMENT)
         
-        # 2. 關鍵修正：透過 shimmy 轉換成 Gymnasium (New Gym)
-        # 這解決了 AssertionError: Expected env to be a gymnasium.Env
+        # 2. 透過 shimmy 轉換成 Gymnasium
         env = shimmy.GymV21CompatibilityV0(env=env)
         
-        # 3. 接下來使用 Gymnasium 的 Wrappers
+        # 3. 使用 Gymnasium Wrappers
         env = SkipFrame(env, skip=4)
-        env = GrayScaleObservation(env, keep_dim=True)
+        # 【修正】這裡改成 GrayscaleObservation (小寫 s)
+        env = GrayscaleObservation(env, keep_dim=True)
         env = ResizeObservation(env, (84, 84))
         
-        # Monitor 必須包在最後 (它是 Gymnasium 格式)
         env = Monitor(env)
         
         env.reset(seed=seed + rank)
@@ -84,13 +79,10 @@ def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     print(f"[INFO] Launching {N_ENVS} parallel environments with Shimmy compatibility...")
-    # 使用 SubprocVecEnv 平行運算
     env = SubprocVecEnv([make_env(ENV_ID, i) for i in range(N_ENVS)])
     
-    # SB3 的 FrameStack 會自動處理通道堆疊
     env = VecFrameStack(env, n_stack=4, channels_order='last')
 
-    # 定義 PPO
     model = PPO(
         "CnnPolicy",
         env,
