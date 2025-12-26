@@ -202,7 +202,6 @@ def main():
             prev_info = dict(info)
 
             next_state_proc = np.array(next_state).astype(np.float32) / 255.0
-            next_state_proc = np.expand_dims(next_state_proc, axis=0)
 
             memory.push(state, action, r, next_state_proc, done)
             state = next_state_proc
