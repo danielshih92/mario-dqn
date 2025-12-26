@@ -8,7 +8,7 @@ from nes_py.wrappers import JoypadSpace
 # 新的 gymnasium (給 SB3 用)
 import gymnasium as new_gym
 # 【修正】這裡改成 GrayscaleObservation (小寫 s)
-from gymnasium.wrappers import ResizeObservation, GrayscaleObservation
+from gymnasium.wrappers import ResizeObservation, GrayScaleObservation
 import shimmy
 
 # Stable Baselines3
