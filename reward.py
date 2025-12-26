@@ -1,14 +1,15 @@
 import numpy as np
 
-"""Fast-clear reward shaping utilities for Super Mario Bros.
+"""
+Reward shaping for fast clear (1-1).
 
-Design goals (aggressive shaping for fast clearing):
-- Make forward progress (dx>0) the dominant signal.
-- Strongly punish stagnation (dx==0) to break pipe-stuck behavior.
-- Reward *forward jump* (dy>0 AND dx>0), not pogo-jumping in place.
-- Heavily punish damage / death to prevent face-tanking enemies.
-- Keep coins/score as mild auxiliary signals.
-- Always be robust to missing keys in `info` / `prev_info`.
+Core idea:
+- Reward forward progress strongly (x_pos delta)
+- Penalize stagnation (stuck)
+- Small time penalty
+- Big reward when flag_get
+- Penalize death / damage (if keys exist)
+- Optional nonlinear reward transform (stabilizes learning)
 """
 
 def _get(info, key, default=0):
@@ -17,88 +18,70 @@ def _get(info, key, default=0):
     except Exception:
         return default
 
+
 def _clip(x, lo, hi):
     return float(np.clip(x, lo, hi))
 
+
 def _status_rank(status):
-    # higher is better; robust to variations across implementations
     if status in ("fireball",):
         return 2
     if status in ("tall", "big"):
         return 1
     return 0
 
-def forward_progress_reward(info, reward, prev_info,
-                            forward_weight: float = 0.25,
-                            backtrack_penalty: float = 0.35,
-                            dx_clip: float = 5.0):
-    """Strongly reward moving right; penalize moving left."""
-    x = float(_get(info, "x_pos", 0))
+
+def reward_transform(r: float) -> float:
+    # Common trick (stabilize large sparse rewards):
+    # sign(r) * (sqrt(|r|+1)-1) + 0.001*r
+    return float(np.sign(r) * (np.sqrt(abs(r) + 1.0) - 1.0) + 0.001 * r)
+
+
+def shaped_reward(info, env_reward, prev_info):
+    r = float(env_reward)
+
+    x = float(_get(info, "x_pos", 0.0))
     px = float(_get(prev_info, "x_pos", x))
-    dx = _clip(x - px, -dx_clip, dx_clip)
+    dx = _clip(x - px, -5.0, 5.0)
 
-    r = reward
+    # 1) progress dominates
     if dx > 0:
-        r += forward_weight * dx
+        r += 0.25 * dx
     elif dx < 0:
-        r -= backtrack_penalty * abs(dx)
-    return r, dx  # return dx for later use (e.g., forward-jump gating)
+        r -= 0.35 * abs(dx)
 
-def stagnation_penalty_reward(dx, reward,
-                              stagnation_penalty: float = 0.08):
-    """Harsh penalty when not making horizontal progress (dx==0)."""
-    r = reward
+    # 2) stagnation penalty
     if dx == 0:
-        r -= stagnation_penalty
-    return r
+        r -= 0.08
 
-def forward_jump_reward(info, reward, prev_info, dx,
-                        jump_bonus: float = 0.03,
-                        fall_penalty: float = 0.01,
-                        dy_clip: float = 6.0):
-    """Reward upward motion only if moving forward; penalize falling when stuck."""
-    y = float(_get(info, "y_pos", 0))
+    # 3) forward jump bonus (only if moving forward)
+    y = float(_get(info, "y_pos", 0.0))
     py = float(_get(prev_info, "y_pos", y))
-    dy = _clip(y - py, -dy_clip, dy_clip)
-
-    r = reward
+    dy = _clip(y - py, -6.0, 6.0)
     if dy > 0 and dx > 0:
-        r += jump_bonus * dy
-    elif dy < 0 and dx <= 0:
-        r -= fall_penalty * abs(dy)
-    return r
+        r += 0.03 * dy
 
-def coin_reward(info, reward, prev_info, coin_weight: float = 2.0):
-    """Small bonus for collecting coins (aux signal)."""
-    coins = float(_get(info, "coins", 0))
+    # 4) mild aux signals
+    coins = float(_get(info, "coins", 0.0))
     pcoins = float(_get(prev_info, "coins", coins))
-    dcoins = coins - pcoins
-    return reward + coin_weight * dcoins
+    if coins > pcoins:
+        r += 2.0 * (coins - pcoins)
 
-def score_reward(info, reward, prev_info, score_weight: float = 0.002):
-    """Small bonus for increasing in-game score (often enemies/items)."""
-    score = float(_get(info, "score", 0))
+    score = float(_get(info, "score", 0.0))
     pscore = float(_get(prev_info, "score", score))
     dscore = score - pscore
     if dscore > 0:
-        return reward + score_weight * dscore
-    return reward
+        r += 0.002 * dscore
 
-def time_penalty_reward(reward, per_step_penalty: float = 0.02):
-    """Per-step penalty to encourage faster completion."""
-    return reward - per_step_penalty
+    # 5) per-step time penalty
+    r -= 0.02
 
-def damage_death_penalty_reward(info, reward, prev_info,
-                                life_drop_penalty: float = 50.0,
-                                status_drop_penalty: float = 25.0):
-    """Heavily punish getting hurt or losing a life."""
-    r = reward
-
+    # 6) damage / death penalty (if available)
     life = _get(info, "life", None)
     plife = _get(prev_info, "life", life)
     try:
         if (life is not None) and (plife is not None) and (life < plife):
-            r -= life_drop_penalty
+            r -= 50.0
     except Exception:
         pass
 
@@ -107,41 +90,15 @@ def damage_death_penalty_reward(info, reward, prev_info,
     try:
         if (status is not None) and (pstatus is not None):
             if _status_rank(status) < _status_rank(pstatus):
-                r -= status_drop_penalty
+                r -= 25.0
     except Exception:
         pass
 
+    # 7) clear bonus
+    if bool(_get(info, "flag_get", False)):
+        r += 500.0
+
+    # final stabilization transform
+    r = reward_transform(r)
     return r
 
-def final_flag_reward(info, reward, flag_bonus: float = 500.0):
-    """Big bonus when reaching the flag."""
-    flag_get = bool(_get(info, "flag_get", False))
-    return reward + (flag_bonus if flag_get else 0.0)
-
-def shaped_reward(info, env_reward, prev_info):
-    """Apply all shaping in a single call (aggressive, fast-clear)."""
-    r = float(env_reward)
-
-    # 1) Progress dominates
-    r, dx = forward_progress_reward(info, r, prev_info)
-
-    # 2) Break pipe-stuck behavior
-    r = stagnation_penalty_reward(dx, r)
-
-    # 3) Encourage forward jump, not pogo jumping
-    r = forward_jump_reward(info, r, prev_info, dx)
-
-    # 4) Mild aux signals
-    r = coin_reward(info, r, prev_info)
-    r = score_reward(info, r, prev_info)
-
-    # 5) Finish faster
-    r = time_penalty_reward(r)
-
-    # 6) Avoid taking damage / dying
-    r = damage_death_penalty_reward(info, r, prev_info)
-
-    # 7) Clear
-    r = final_flag_reward(info, r)
-
-    return r

@@ -1,74 +1,48 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-# Basic Block
-class Basic_C2D_Block(nn.Module):
-    def __init__(self, in_dim, out_dim, k_size, stride, is_BN):
-        super(Basic_C2D_Block, self).__init__()
-        self.conv_1 = nn.Conv2d(
-            in_dim, out_dim, kernel_size=k_size, stride=stride, padding=k_size // 2
-        )
-        self.bn_1 = nn.BatchNorm2d(out_dim) if is_BN else nn.Identity()              
-        self.lrelu = nn.LeakyReLU(inplace=False)
 
-    def forward(self, x):
-        y = self.conv_1(x)
-        y = self.bn_1(y)
-        return self.lrelu(y)
+def init_weights(m: nn.Module):
+    if isinstance(m, (nn.Conv2d, nn.Linear)):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0.01)
 
-# Residual Block
-class Res_C2D_Block(nn.Module):
-    def __init__(self, in_dim, out_dim, num_blocks, stride=1):
-        super(Res_C2D_Block, self).__init__()
 
-        layers = []
-        for i in range(num_blocks):
-            layers.append(
-                Basic_C2D_Block(
-                    in_dim=in_dim if i == 0 else out_dim,
-                    out_dim=out_dim,
-                    k_size=3,
-                    stride=stride if i == 0 else 1, 
-                    is_BN=False,
-                )
-            )
-        self.blocks = nn.Sequential(*layers)
-
-        self.adjust_residual = None
-        if in_dim != out_dim or stride != 1:
-            self.adjust_residual = nn.Sequential(
-                nn.Conv2d(in_dim, out_dim, kernel_size=1, stride=stride, padding=0, bias=False),
-                nn.BatchNorm2d(out_dim),
-            )
-
-    def forward(self, x):
-        residual = x
-        if self.adjust_residual:
-            residual = self.adjust_residual(x)
-
-        y = self.blocks(x)
-        y += residual
-        return nn.LeakyReLU(inplace=False)(y)
-
-class CustomCNN(nn.Module):
+class DuelingCNN(nn.Module):
+    """
+    Dueling DQN network:
+      Q(s,a) = V(s) + (A(s,a) - mean(A))
+    Input:  (B, C, 84, 84) where C = stack_k (default 4)
+    Output: (B, num_actions)
+    """
     def __init__(self, input_shape, num_actions):
-        super(CustomCNN, self).__init__()
+        super().__init__()
+        c, h, w = input_shape
+        assert (h, w) == (84, 84), "Expected input 84x84"
 
-        channels, _, _ = input_shape
+        self.conv1 = nn.Conv2d(c, 32, kernel_size=8, stride=4)  # 84 -> 20
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1) # 20 -> 18
 
-        self.basic = Basic_C2D_Block(channels, 24, k_size=4, stride=4, is_BN=False)   # Basic_C2D_Block
-        self.res1  = Res_C2D_Block(24, 48, num_blocks=2, stride=2)                    # Res_C2D_Block
-        self.res2  = Res_C2D_Block(48, 96, num_blocks=2, stride=2)                    # Res_C2D_Block
+        # 18*18*64 = 20736
+        self.fc = nn.Linear(18 * 18 * 64, 512)
 
-        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)                                # Adaptive Global Average Pooling (自適應全局平均池化)
-        self.fc = nn.Linear(96, num_actions)                                          # Fully Connected Layer (全連接層)
+        self.adv = nn.Linear(512, num_actions)
+        self.val = nn.Linear(512, 1)
+
+        self.apply(init_weights)
 
     def forward(self, x):
-        x = self.basic(x)
-        x = self.res1(x)
-        x = self.res2(x)
-
-        x = self.global_avg_pool(x)
+        # x: (B,C,84,84)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
         x = x.view(x.size(0), -1)
-        return self.fc(x)
+        x = F.relu(self.fc(x))
+
+        adv = self.adv(x)          # (B,A)
+        val = self.val(x)          # (B,1)
+        q = val + (adv - adv.mean(dim=1, keepdim=True))
+        return q
+
 
