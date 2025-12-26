@@ -1,55 +1,32 @@
 import os
-import numpy as np
-import torch
-from tqdm import tqdm
-import glob
 import gym
+import torch
 import gym_super_mario_bros
-from nes_py.wrappers import JoypadSpace
-from gym.wrappers import FrameStack, GrayScaleObservation, ResizeObservation
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
+from nes_py.wrappers import JoypadSpace
+from gym.wrappers import GrayScaleObservation, ResizeObservation
 
-from reward import shaped_reward
-from model import CustomCNN
-from DQN import DQN, ReplayMemory
+# Stable Baselines3
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import VecFrameStack, SubprocVecEnv, DummyVecEnv
+from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.monitor import Monitor
 
-# ===================== Config =====================
+# ================= Config =================
 ENV_ID = "SuperMarioBros-1-1-v0"
-LR = 0.00025               # 稍微調高一點點
-BATCH_SIZE = 32            # 32 或 64 都可以
-GAMMA = 0.99
-MEMORY_SIZE = 50_000       # 5萬 frames 對 Mario 夠用了，且絕對不會爆 RAM
-TARGET_UPDATE = 1000      
-TOTAL_EPISODES = 5000
+SAVE_DIR = "ckpt_ppo"
+TOTAL_TIMESTEPS = 2_000_000  # 200萬步通常能穩定通關
+LEARNING_RATE = 2.5e-4
+N_ENVS = 4                   # 同時開 4 個馬力歐 (Colab T4 極限)
+SAVE_FREQ = 50_000           # 每 5 萬步存一次檔
 
-EPS_START = 1.0
-EPS_END = 0.02
-EPS_DECAY_EPISODES = 2000 
-
-SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
-SAVE_EVERY = 200
-EVAL_INTERVAL = 100
-MAX_EVAL_STEPS = 3000
-
-RESUME = False
-RESUME_PATH = "" 
-
-USE_REDUCED_ACTIONS = True
-# 稍微優化的動作空間：移除單純的 "A" (跳)，通常我們希望向右跑並跳
-REDUCED_MOVEMENT = [
-    ['NOOP'],
-    ['right'],
-    ['right', 'A'],
-    ['right', 'B'],
-    ['right', 'A', 'B'],
-    ['A'],
-    ['left']
-]
-
-# ===================== Custom Wrappers =====================
+# ================= Wrappers =================
 class SkipFrame(gym.Wrapper):
-    """每做一次決策，重複執行 skip 次，合併獎勵。大幅提升速度。"""
-    def __init__(self, env, skip):
+    """
+    關鍵加速：每 4 幀做一次決策，並加總獎勵。
+    這讓模型能學到更長遠的後果，並提升 4 倍訓練速度。
+    """
+    def __init__(self, env, skip=4):
         super().__init__(env)
         self._skip = skip
 
@@ -63,143 +40,77 @@ class SkipFrame(gym.Wrapper):
                 break
         return obs, total_reward, done, info
 
-def make_env():
-    env = gym_super_mario_bros.make(ENV_ID)
-    env = JoypadSpace(env, REDUCED_MOVEMENT if USE_REDUCED_ACTIONS else SIMPLE_MOVEMENT)
-    
-    # 關鍵：加入 SkipFrame (通常是 4)
-    env = SkipFrame(env, skip=4)
-    
-    # 影像處理管道
-    env = ResizeObservation(env, (84, 84))
-    env = GrayScaleObservation(env, keep_dim=False)
-    # Transform to Normalize not here! Keep it uint8 until DQN.
-    env = FrameStack(env, num_stack=4)
-    return env
-
-def epsilon_by_episode(ep):
-    return max(EPS_END, EPS_START - (ep / EPS_DECAY_EPISODES) * (EPS_START - EPS_END))
-
-@torch.no_grad()
-def run_eval(dqn, ep):
-    env = make_env()
-    state = env.reset() # LazyFrames (4, 84, 84) uint8
-    done = False
-    total_reward = 0
-    steps = 0
-    
-    # Evaluation 時不需要 shaped reward，看原始分數即可
-    while not done and steps < MAX_EVAL_STEPS:
-        # LazyFrames -> np.array (uint8)
-        state_np = np.array(state) 
-        action = dqn.take_action(state_np, deterministic=True)
+def make_env(env_id, rank, seed=0):
+    """
+    建立單一環境的工廠函數
+    """
+    def _init():
+        env = gym_super_mario_bros.make(env_id)
+        # 限制動作空間 (使用 SIMPLE_MOVEMENT 包含跑跳，足夠通關)
+        env = JoypadSpace(env, SIMPLE_MOVEMENT)
         
-        state, reward, done, info = env.step(action)
-        total_reward += reward
-        steps += 1
-    env.close()
-    return total_reward, steps
+        # 1. Skip Frame (最重要)
+        env = SkipFrame(env, skip=4)
+        # 2. 灰階
+        env = GrayScaleObservation(env, keep_dim=True)
+        # 3. 縮放 (84x84)
+        env = ResizeObservation(env, (84, 84))
+        
+        # Monitor 用於記錄每回合的 Reward，方便 TensorBoard 繪圖
+        env = Monitor(env)
+        
+        env.seed(seed + rank)
+        return env
+    return _init
 
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
-    env = make_env()
-    # 測試一下 env 輸出形狀
-    tmp_obs = env.reset()
-    obs_shape = np.array(tmp_obs).shape # 預期 (4, 84, 84)
-    n_actions = env.action_space.n
-    
-    print(f"Observation shape: {obs_shape}, Action space: {n_actions}")
+    # 確保儲存目錄存在
+    os.makedirs(SAVE_DIR, exist_ok=True)
 
-    dqn = DQN(
-        model_cls=CustomCNN,
-        state_dim=obs_shape,
-        action_dim=n_actions,
-        learning_rate=LR,
-        gamma=GAMMA,
-        epsilon=EPS_START,
-        target_update=TARGET_UPDATE,
-        device=device,
+    # 1. 建立向量化環境 (8個平行環境)
+    # SubprocVecEnv 會在不同 CPU 核心跑，大幅加速
+    print(f"[INFO] Launching {N_ENVS} parallel environments...")
+    env = SubprocVecEnv([make_env(ENV_ID, i) for i in range(N_ENVS)])
+    
+    # 2. Frame Stack (由 SB3 的 VecFrameStack 處理，更高效)
+    # channels_order='last' -> (84, 84, 4) -> SB3 會自動轉成 (4, 84, 84) 給 CNN
+    env = VecFrameStack(env, n_stack=4, channels_order='last')
+
+    # 3. 定義模型
+    # CnnPolicy: SB3 內建的 Nature CNN (跟 DeepMind 用的一樣)
+    model = PPO(
+        "CnnPolicy",
+        env,
+        verbose=1,
+        learning_rate=LEARNING_RATE,
+        n_steps=512,        # 每個環境跑 512 步更新一次 (共 512*8 = 4096 步)
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        tensorboard_log="./logs/",
+        device="cuda"       # 強制使用 GPU
     )
 
-    if RESUME and os.path.exists(RESUME_PATH):
-        dqn.q_net.load_state_dict(torch.load(RESUME_PATH))
-        print("Model loaded.")
+    # 4. 設定自動存檔 Callback
+    # 注意：save_freq 是指每個環境的步數，所以實際儲存頻率是 SAVE_FREQ * N_ENVS
+    checkpoint_callback = CheckpointCallback(
+        save_freq=max(SAVE_FREQ // N_ENVS, 1),
+        save_path=SAVE_DIR,
+        name_prefix="mario_ppo"
+    )
 
-    # 初始化 Memory，注意這裡傳入 shape
-    memory = ReplayMemory(MEMORY_SIZE, obs_shape)
-
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    best_score = -999999
-
-    for ep in tqdm(range(1, TOTAL_EPISODES + 1)):
-        state = env.reset() # LazyFrames uint8
-        done = False
-        
-        # 轉換為 numpy uint8 以便處理，但在記憶體中我們已經優化
-        state_np = np.array(state, dtype=np.uint8)
-        
-        dqn.epsilon = epsilon_by_episode(ep)
-        
-        prev_info = {"x_pos": 0, "coins": 0, "score": 0, "life": 2}
-        stagnation_counter = 0
-        ep_reward = 0
-        
-        while not done:
-            # 選擇動作
-            action = dqn.take_action(state_np, deterministic=False)
-            
-            # 執行動作
-            next_state, reward, done, info = env.step(action)
-            next_state_np = np.array(next_state, dtype=np.uint8)
-            
-            # 處理 Reward Shaping
-            # 計算 stagnation
-            x_pos = info.get("x_pos", 0)
-            if x_pos == prev_info.get("x_pos", 0):
-                stagnation_counter += 1
-            else:
-                stagnation_counter = 0
-            
-            # 使用你的 reward.py
-            r_shaped = shaped_reward(info, reward, prev_info, stagnation_counter)
-            prev_info = info
-            
-            # 存入記憶體 (存 uint8)
-            memory.push(state_np, action, r_shaped, next_state_np, done)
-            
-            state_np = next_state_np
-            ep_reward += reward
-
-            # 開始訓練
-            if len(memory) > 2000: # 稍微累積一點資料再練
-                batch = memory.sample(BATCH_SIZE)
-                state_dict = {
-                    "states": batch[0],
-                    "actions": batch[1],
-                    "rewards": batch[2],
-                    "next_states": batch[3],
-                    "dones": batch[4],
-                }
-                dqn.train_per_step(state_dict)
-
-        # Log
-        if ep % 10 == 0:
-            print(f"Ep {ep} | Reward: {ep_reward:.1f} | Epsilon: {dqn.epsilon:.3f} | Mem: {len(memory)}")
-
-        # Save & Eval
-        if ep % SAVE_EVERY == 0:
-            torch.save(dqn.q_net.state_dict(), os.path.join(SAVE_DIR, "latest.pth"))
-        
-        if ep % EVAL_INTERVAL == 0:
-            score, steps = run_eval(dqn, ep)
-            print(f"[EVAL] Ep {ep} Score: {score:.1f}, Steps: {steps}")
-            if score > best_score:
-                best_score = score
-                torch.save(dqn.q_net.state_dict(), os.path.join(SAVE_DIR, "best.pth"))
-                print(f"New Best Model Saved! Score: {score}")
-
+    # 5. 開始訓練
+    print("[INFO] Start training...")
+    try:
+        model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=checkpoint_callback)
+    except KeyboardInterrupt:
+        print("Training interrupted. Saving current model...")
+    
+    # 6. 儲存最終模型
+    model.save(os.path.join(SAVE_DIR, "mario_ppo_final"))
+    print(f"[INFO] Model saved to {SAVE_DIR}")
     env.close()
 
 if __name__ == "__main__":
