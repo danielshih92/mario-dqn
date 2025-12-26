@@ -1,74 +1,45 @@
 import torch
 import torch.nn as nn
 
-# Basic Block
-class Basic_C2D_Block(nn.Module):
-    def __init__(self, in_dim, out_dim, k_size, stride, is_BN):
-        super(Basic_C2D_Block, self).__init__()
-        self.conv_1 = nn.Conv2d(
-            in_dim, out_dim, kernel_size=k_size, stride=stride, padding=k_size // 2
-        )
-        self.bn_1 = nn.BatchNorm2d(out_dim) if is_BN else nn.Identity()              
-        self.lrelu = nn.LeakyReLU(inplace=False)
-
-    def forward(self, x):
-        y = self.conv_1(x)
-        y = self.bn_1(y)
-        return self.lrelu(y)
-
-# Residual Block
-class Res_C2D_Block(nn.Module):
-    def __init__(self, in_dim, out_dim, num_blocks, stride=1):
-        super(Res_C2D_Block, self).__init__()
-
-        layers = []
-        for i in range(num_blocks):
-            layers.append(
-                Basic_C2D_Block(
-                    in_dim=in_dim if i == 0 else out_dim,
-                    out_dim=out_dim,
-                    k_size=3,
-                    stride=stride if i == 0 else 1, 
-                    is_BN=False,
-                )
-            )
-        self.blocks = nn.Sequential(*layers)
-
-        self.adjust_residual = None
-        if in_dim != out_dim or stride != 1:
-            self.adjust_residual = nn.Sequential(
-                nn.Conv2d(in_dim, out_dim, kernel_size=1, stride=stride, padding=0, bias=False),
-                nn.BatchNorm2d(out_dim),
-            )
-
-    def forward(self, x):
-        residual = x
-        if self.adjust_residual:
-            residual = self.adjust_residual(x)
-
-        y = self.blocks(x)
-        y += residual
-        return nn.LeakyReLU(inplace=False)(y)
-
 class CustomCNN(nn.Module):
+    """
+    經典的 Nature CNN 架構 (來自 DQN 2015 論文)。
+    對於 84x84 的 Atari/Mario 遊戲，這通常比 ResNet 更快且更容易收斂。
+    """
     def __init__(self, input_shape, num_actions):
         super(CustomCNN, self).__init__()
-
-        channels, _, _ = input_shape
-
-        self.basic = Basic_C2D_Block(channels, 24, k_size=4, stride=4, is_BN=False)   # Basic_C2D_Block
-        self.res1  = Res_C2D_Block(24, 48, num_blocks=2, stride=2)                    # Res_C2D_Block
-        self.res2  = Res_C2D_Block(48, 96, num_blocks=2, stride=2)                    # Res_C2D_Block
-
-        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)                                # Adaptive Global Average Pooling (自適應全局平均池化)
-        self.fc = nn.Linear(96, num_actions)                                          # Fully Connected Layer (全連接層)
+        
+        c, h, w = input_shape
+        
+        self.features = nn.Sequential(
+            # Conv 1: 32 filters, 8x8 kernel, stride 4
+            nn.Conv2d(c, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            # Conv 2: 64 filters, 4x4 kernel, stride 2
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            # Conv 3: 64 filters, 3x3 kernel, stride 1
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU()
+        )
+        
+        # 計算卷積後的特徵圖大小
+        # 84x84 -> (stride 4) -> 21x21 -> (stride 2) -> 11x11 -> (stride 1) -> 7x7 (Padding=0時約略值，需精確計算)
+        # 實際計算: 
+        # 84 -> (84-8)/4 +1 = 20
+        # 20 -> (20-4)/2 +1 = 9
+        # 9  -> (9-3)/1 +1  = 7
+        # 最終是 64 * 7 * 7 = 3136
+        
+        self.fc = nn.Sequential(
+            nn.Linear(3136, 512),
+            nn.ReLU(),
+            nn.Linear(512, num_actions)
+        )
 
     def forward(self, x):
-        x = self.basic(x)
-        x = self.res1(x)
-        x = self.res2(x)
-
-        x = self.global_avg_pool(x)
-        x = x.view(x.size(0), -1)
-        return self.fc(x)
+        x = self.features(x)
+        x = x.reshape(x.size(0), -1) # Flatten
+        x = self.fc(x)
+        return x
 

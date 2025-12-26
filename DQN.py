@@ -2,102 +2,120 @@ import torch as T
 import torch.nn.functional as F
 import numpy as np
 import random
-from collections import deque
 
-class ReplayMemory:                                                              # 存儲和取樣訓練數據
-    def __init__(self, capacity):
-        self.memory = deque(maxlen=capacity)                                     # 使用 deque 儲存數據，設置 maxlen，確保記憶體達到容量上限時，會自動移除最舊的經驗
-                                                                                 # self.memory 是一個 deque，存儲了許多 tuple，每個 tuple 表示一條經驗，格式為(s,a,r,n_s,d)
-    def push(self, state, action, reward, next_state, done):                     # 將經驗 (state, action, reward, next_state, done) 添加到記憶體
-        self.memory.append((state, action, reward, next_state, done))    
+class ReplayMemory:
+    """
+    使用預先分配的 Numpy Array 來儲存經驗，大幅減少記憶體碎片化與佔用。
+    強制儲存 dtype=np.uint8，節省 4 倍記憶體。
+    """
+    def __init__(self, capacity, state_shape):
+        self.capacity = capacity
+        self.ptr = 0
+        self.size = 0
+        
+        # 預先分配記憶體
+        # state_shape 通常是 (4, 84, 84)
+        self.states = np.zeros((capacity, *state_shape), dtype=np.uint8)
+        self.next_states = np.zeros((capacity, *state_shape), dtype=np.uint8)
+        self.actions = np.zeros(capacity, dtype=np.int64)
+        self.rewards = np.zeros(capacity, dtype=np.float32)
+        self.dones = np.zeros(capacity, dtype=np.bool_)
 
-    def sample(self, batch_size): 
-        batch = random.sample(self.memory, batch_size)                           # batch = 從記憶體中隨機取樣的 batch_size 筆資料
-        states, actions, rewards, next_states, dones = zip(*batch)               # zip(*batch) 會將多筆經驗中的同類型資料（如狀態、動作）組合在一起
-                                                                                 # ex.batch取樣32條(s,a,r,n_s,d)，則 zip(*batch) 中 states=[s1,s2,...,s32],actions=[a1,a2,...,a32]
-        return np.stack(states), actions, rewards, np.stack(next_states), dones  # np.stack 將 states 與 next_states 轉為 NumPy 陣列，方便後續運算
+    def push(self, state, action, reward, next_state, done):
+        # 存入時保持 uint8 (0-255)，不做正規化
+        self.states[self.ptr] = state
+        self.next_states[self.ptr] = next_state
+        self.actions[self.ptr] = action
+        self.rewards[self.ptr] = reward
+        self.dones[self.ptr] = done
+        
+        self.ptr = (self.ptr + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
 
-    def __len__(self):                                                           # 記憶體中目前儲存的經驗數量
-        return len(self.memory)                                                  
+    def sample(self, batch_size):
+        idxs = np.random.randint(0, self.size, size=batch_size)
+        
+        return (
+            self.states[idxs],
+            self.actions[idxs],
+            self.rewards[idxs],
+            self.next_states[idxs],
+            self.dones[idxs]
+        )
+
+    def __len__(self):
+        return self.size
 
 class DQN:
-    def __init__(self,
-                 model,
-                 state_dim, action_dim, 
-                 learning_rate, gamma,
-                 epsilon, target_update, device):
+    def __init__(self, model_cls, state_dim, action_dim, learning_rate, gamma, epsilon, target_update, device):
         self.device = device
         self.action_dim = action_dim
-        
-        self.gamma = gamma  
+        self.gamma = gamma
         self.epsilon = epsilon
         self.target_update = target_update
         self.update_count = 0
 
-        # Initialize [Q-net] and target [Q-net]
-        self.model = model
-        self.q_net = self._build_net(state_dim, action_dim)                      #  [Q-net]，實際訓練的網路 (即時更新)
-        self.tgt_q_net = self._build_net(state_dim, action_dim)                  # target [Q-net]，用於穩定訓練（延遲更新）
-        self.tgt_q_net.load_state_dict(self.q_net.state_dict())                  # 複製 [Q-net] 的權重到 target [Q-net]
+        # 初始化網路
+        self.q_net = model_cls(state_dim, action_dim).to(self.device)
+        self.tgt_q_net = model_cls(state_dim, action_dim).to(self.device)
+        self.tgt_q_net.load_state_dict(self.q_net.state_dict())
+        self.tgt_q_net.eval() # Target net 不需要計算梯度
 
-        # Optimizer
         self.optimizer = T.optim.Adam(self.q_net.parameters(), lr=learning_rate)
-    
-    # 定義神經網路構造函數
-    def _build_net(self, state_dim, action_dim):                                 # 根據傳入的模型架構 (self.model) 初始化後的神經網路，並將其移到 device 上
-        return self.model(state_dim,action_dim).to(self.device)
-    
-    # action 選擇函數
-    def take_action(self, state, deterministic: bool = False):
-        """Select an action.
 
-        - deterministic=False: epsilon-greedy (explore with prob epsilon, otherwise greedy).
-        - deterministic=True: always greedy (argmax Q).
+    def take_action(self, state, deterministic=False):
         """
-        if (not deterministic) and (np.random.rand() < self.epsilon):
+        Input state: np.array (4, 84, 84) uint8 [0-255] or float [0-1]
+        """
+        if not deterministic and np.random.random() < self.epsilon:
             return np.random.randint(self.action_dim)
-
-        state_x = T.from_numpy(state).float().unsqueeze(0).to(self.device)
+        
+        # 處理輸入：轉 Tensor -> Float -> Normalize -> Add Batch Dim -> GPU
+        if isinstance(state, np.ndarray):
+            state = T.tensor(state, dtype=T.float32, device=self.device)
+        
+        # 如果還是 0-255，就除以 255
+        if state.max() > 1.0:
+            state = state / 255.0
+            
+        if state.dim() == 3:
+            state = state.unsqueeze(0)
 
         with T.no_grad():
-            q_values = self.q_net(state_x)  # shape: [1, action_dim]
-            return int(T.argmax(q_values, dim=1).item())
-# 從類別分佈中抽樣一個動作，並返回對應的索引（即選擇的動作）
-        
-    #　損失函數計算
-    def get_loss(self, states, actions, rewards, next_states, dones):
-        # Get current Q-values
-        actions = actions.unsqueeze(1) 
-        q_val = self.q_net(states).gather(1, actions).squeeze(1)                 # 計算當下的 Q-value
-                                                                 
-        # Get maximum expected Q-values
-        next_q_val = self.tgt_q_net(next_states).max(dim=1)[0]                   # 計算 target Q-value 的最大值 
-                                                               
-        # Compute target Q-values [custom-reward]
-        q_target = rewards + self.gamma * next_q_val * (1 - dones.float())       # 計算 target Q-value
-        
-        return T.nn.functional.mse_loss(q_val, q_target.detach())                # 用均方誤差 (MSE) 計算 loss 
+            q_values = self.q_net(state)
+            return q_values.argmax().item()
 
     def train_per_step(self, state_dict):
-        # Convert one trajectory(s,a,r,n_s) to tensor
-        states,actions,rewards,next_states,dones = self._state_2_tensor(state_dict)  # 將原本存儲於 Python 資料結構中的數據轉換為 PyTorch 張量
+        # 1. 取出數據並轉移到 GPU，同時做 Normalize
+        states = T.tensor(state_dict['states'], dtype=T.float32, device=self.device) / 255.0
+        next_states = T.tensor(state_dict['next_states'], dtype=T.float32, device=self.device) / 255.0
+        actions = T.tensor(state_dict['actions'], dtype=T.int64, device=self.device).unsqueeze(1)
+        rewards = T.tensor(state_dict['rewards'], dtype=T.float32, device=self.device)
+        dones = T.tensor(state_dict['dones'], dtype=T.float32, device=self.device)
 
-        # Compute loss 
-        loss = self.get_loss(states, actions, rewards, next_states, dones)
-        self.optimizer.zero_grad()                                               # 每次進行梯度更新之前，清除累積的梯度值
-        loss.backward()                                                          # 利用計算的損失值進行反向傳播，計算每個參數的梯度
-        self.optimizer.step()                                                    # 利用計算的梯度來更新 [Q-net] 的參數
+        # 2. 計算 Current Q (Q_eval)
+        # gather: 選擇對應 action 的 Q 值
+        q_eval = self.q_net(states).gather(1, actions).squeeze(1)
 
-        if self.update_count % self.target_update == 0:                          # runs.py 內定義 target_update=TARGET_UPDATE=50(更新頻率)
-            self.tgt_q_net.load_state_dict(self.q_net.state_dict())              # 定期將 [Q-net] 的參數複製到 target [Q-net]
+        # 3. 計算 Target Q (Double DQN)
+        with T.no_grad():
+            # 使用 Q_net 選擇動作 (解耦選擇與評估)
+            next_actions = self.q_net(next_states).argmax(dim=1, keepdim=True)
+            # 使用 Target_net 評估該動作的價值
+            q_next = self.tgt_q_net(next_states).gather(1, next_actions).squeeze(1)
+            
+            q_target = rewards + self.gamma * q_next * (1 - dones)
 
+        # 4. Loss & Backprop
+        loss = F.smooth_l1_loss(q_eval, q_target) # Huber Loss 比 MSE 更穩定
+        
+        self.optimizer.zero_grad()
+        loss.backward()
+        # 梯度裁剪，防止梯度爆炸
+        T.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=10.0)
+        self.optimizer.step()
+
+        # 5. Update Target Network
         self.update_count += 1
-    
-    def _state_2_tensor(self,state_dict):                                        # 將一條經驗軌跡 (s,a,r,n_s,d) 中的數據轉換為 PyTorch 張量
-        states      = T.tensor(state_dict['states'], dtype=T.float32, device=self.device)
-        actions     = T.tensor(state_dict['actions'], dtype=T.long, device=self.device)
-        rewards     = T.tensor(state_dict['rewards'], dtype=T.float32, device=self.device)
-        next_states = T.tensor(state_dict['next_states'], dtype=T.float32, device=self.device)
-        dones       = T.tensor(state_dict['dones'], dtype=T.float32, device=self.device)
-
-        return states,actions,rewards,next_states,dones
+        if self.update_count % self.target_update == 0:
+            self.tgt_q_net.load_state_dict(self.q_net.state_dict())

@@ -1,156 +1,119 @@
 import os
-import time
 import numpy as np
 import torch
-import cv2
 from tqdm import tqdm
 import glob
-
 import gym
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
-from gym.wrappers import StepAPICompatibility
-from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
 from gym.wrappers import FrameStack, GrayScaleObservation, ResizeObservation
+from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
 
-from utils import preprocess_frame
 from reward import shaped_reward
 from model import CustomCNN
 from DQN import DQN, ReplayMemory
 
-
 # ===================== Config =====================
 ENV_ID = "SuperMarioBros-1-1-v0"
-
-LR = 1e-4
-BATCH_SIZE = 64
+LR = 0.00025               # 稍微調高一點點
+BATCH_SIZE = 32            # 32 或 64 都可以
 GAMMA = 0.99
-MEMORY_SIZE = 100_000
-TARGET_UPDATE = 2_000          # in gradient steps
-TOTAL_EPISODES = 5000 #2000
+MEMORY_SIZE = 50_000       # 5萬 frames 對 Mario 夠用了，且絕對不會爆 RAM
+TARGET_UPDATE = 1000      
+TOTAL_EPISODES = 5000
 
-# Exploration schedule
 EPS_START = 1.0
-EPS_END = 0.05
-EPS_DECAY_EPISODES = 3000      # linearly decay over first N episodes
-
-# Rendering / evaluation
-TRAIN_RENDER = False           # training render is slow; keep False
-EVAL_INTERVAL = 50 #500            # run an eval episode every N episodes
-MAX_EVAL_STEPS = 5000
-
-# Early stop if stuck
-MAX_STAGNATION_STEPS = 500
+EPS_END = 0.02
+EPS_DECAY_EPISODES = 2000 
 
 SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
-SAVE_EVERY = 200               # save checkpoint every N episodes (in addition to best)
+SAVE_EVERY = 200
+EVAL_INTERVAL = 100
+MAX_EVAL_STEPS = 3000
 
-EP_OFFSET = 0 # to keep track of actual episode number when resuming training
 RESUME = False
-RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_3400.pth"
+RESUME_PATH = "" 
 
-# Reduce action space (often helps early learning)
 USE_REDUCED_ACTIONS = True
+# 稍微優化的動作空間：移除單純的 "A" (跳)，通常我們希望向右跑並跳
 REDUCED_MOVEMENT = [
-    ["NOOP"],
-    ["right"],
-    ["right", "A"],
-    ["right", "B"],
-    ["right", "A", "B"],
+    ['NOOP'],
+    ['right'],
+    ['right', 'A'],
+    ['right', 'B'],
+    ['right', 'A', 'B'],
+    ['A'],
+    ['left']
 ]
 
+# ===================== Custom Wrappers =====================
+class SkipFrame(gym.Wrapper):
+    """每做一次決策，重複執行 skip 次，合併獎勵。大幅提升速度。"""
+    def __init__(self, env, skip):
+        super().__init__(env)
+        self._skip = skip
+
+    def step(self, action):
+        total_reward = 0.0
+        done = False
+        for i in range(self._skip):
+            obs, reward, done, info = self.env.step(action)
+            total_reward += reward
+            if done:
+                break
+        return obs, total_reward, done, info
 
 def make_env():
     env = gym_super_mario_bros.make(ENV_ID)
-    if isinstance(env, gym.wrappers.TimeLimit):
-        env = env.env
-    env = StepAPICompatibility(env, new_step_api=False)
+    env = JoypadSpace(env, REDUCED_MOVEMENT if USE_REDUCED_ACTIONS else SIMPLE_MOVEMENT)
     
-    movement = REDUCED_MOVEMENT if USE_REDUCED_ACTIONS else SIMPLE_MOVEMENT
-    env = JoypadSpace(env, movement)
-
-    # 依序加入處理層
-    env = ResizeObservation(env, (84, 84)) # 縮放
-    env = GrayScaleObservation(env, keep_dim=False) # 灰階 (H, W)
-    env = FrameStack(env, num_stack=4) # 變成 (4, 84, 84)
+    # 關鍵：加入 SkipFrame (通常是 4)
+    env = SkipFrame(env, skip=4)
     
+    # 影像處理管道
+    env = ResizeObservation(env, (84, 84))
+    env = GrayScaleObservation(env, keep_dim=False)
+    # Transform to Normalize not here! Keep it uint8 until DQN.
+    env = FrameStack(env, num_stack=4)
     return env
 
-
-def epsilon_by_episode(ep: int) -> float:
-    if ep <= 0:
-        return EPS_START
-    if ep >= EPS_DECAY_EPISODES:
-        return EPS_END
-    ratio = ep / float(EPS_DECAY_EPISODES)
-    return EPS_START + ratio * (EPS_END - EPS_START)
-
+def epsilon_by_episode(ep):
+    return max(EPS_END, EPS_START - (ep / EPS_DECAY_EPISODES) * (EPS_START - EPS_END))
 
 @torch.no_grad()
-def run_eval_episode(dqn: DQN, episode_idx: int):
-    # 這裡的 make_env 已經包含了 FrameStack, Resize, GrayScale
+def run_eval(dqn, ep):
     env = make_env()
-    
-    # 這裡出來的 state 已經是 LazyFrames (4, 84, 84)
-    state = env.reset()
+    state = env.reset() # LazyFrames (4, 84, 84) uint8
     done = False
-    prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
-    stagnation = 0
-
-    # 【修正 1】移除 preprocess_frame，改為直接轉型 + Normalize
-    state = np.array(state).astype(np.float32) / 255.0
-    
-    # 注意：這裡不需要 expand_dims 變成 (1, 4, 84, 84)
-    # 因為你的 DQN.take_action 裡面已經有 .unsqueeze(0) 會幫你加 Batch 維度
-
-    total_reward = 0.0
-    total_env_reward = 0.0
+    total_reward = 0
     steps = 0
-
-    MAX_STAGNATION_STEPS = 500
-
-    while (not done) and (steps < MAX_EVAL_STEPS):
-        # deterministic greedy action
-        action = dqn.take_action(state, deterministic=True)
-        next_state, env_reward, done, info = env.step(action)
-
-        if info.get("x_pos", 0) == prev_info.get("x_pos", 0):
-            stagnation += 1
-            if stagnation >= MAX_STAGNATION_STEPS:
-                done = True 
-        else:
-            stagnation = 0
-
-        r = shaped_reward(info, env_reward, prev_info, stagnation)
-        total_reward += float(r)
-        total_env_reward += float(env_reward)
-
-        prev_info = dict(info)
-
-        # 【修正 2】移除 preprocess_frame，改為直接轉型 + Normalize
-        next_state = np.array(next_state).astype(np.float32) / 255.0
+    
+    # Evaluation 時不需要 shaped reward，看原始分數即可
+    while not done and steps < MAX_EVAL_STEPS:
+        # LazyFrames -> np.array (uint8)
+        state_np = np.array(state) 
+        action = dqn.take_action(state_np, deterministic=True)
         
-        state = next_state
+        state, reward, done, info = env.step(action)
+        total_reward += reward
         steps += 1
-
     env.close()
-
-    return {
-        "steps": steps,
-        "total_shaped_reward": total_reward,
-        "total_env_reward": total_env_reward,
-    }
-
+    return total_reward, steps
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
     env = make_env()
-
-    obs_shape = (4, 84, 84)
+    # 測試一下 env 輸出形狀
+    tmp_obs = env.reset()
+    obs_shape = np.array(tmp_obs).shape # 預期 (4, 84, 84)
     n_actions = env.action_space.n
+    
+    print(f"Observation shape: {obs_shape}, Action space: {n_actions}")
 
     dqn = DQN(
-        model=CustomCNN,
+        model_cls=CustomCNN,
         state_dim=obs_shape,
         action_dim=n_actions,
         learning_rate=LR,
@@ -159,60 +122,58 @@ def main():
         target_update=TARGET_UPDATE,
         device=device,
     )
-    if RESUME and os.path.exists(RESUME_PATH):
-        print(f"[RESUME] loading model from {RESUME_PATH}")
-        dqn.q_net.load_state_dict(torch.load(RESUME_PATH))
-        dqn.epsilon = 0.3
 
-    memory = ReplayMemory(MEMORY_SIZE)
+    if RESUME and os.path.exists(RESUME_PATH):
+        dqn.q_net.load_state_dict(torch.load(RESUME_PATH))
+        print("Model loaded.")
+
+    # 初始化 Memory，注意這裡傳入 shape
+    memory = ReplayMemory(MEMORY_SIZE, obs_shape)
 
     os.makedirs(SAVE_DIR, exist_ok=True)
+    best_score = -999999
 
-    best_eval_score = -1e18
-    global_step = 0
-
-    for ep in tqdm(range(1, TOTAL_EPISODES + 1), desc="Training"):
-        effective_ep = EP_OFFSET + ep
-        state = env.reset()
-        
-        # 【修改 1】直接轉型 + Normalize，不要呼叫 preprocess_frame
-        state = np.array(state).astype(np.float32) / 255.0
-
+    for ep in tqdm(range(1, TOTAL_EPISODES + 1)):
+        state = env.reset() # LazyFrames uint8
         done = False
-        prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
-        stagnation = 0
-
-        dqn.epsilon = epsilon_by_episode(effective_ep)
-
-        ep_env_reward = 0.0
-        ep_shaped_reward = 0.0
-
+        
+        # 轉換為 numpy uint8 以便處理，但在記憶體中我們已經優化
+        state_np = np.array(state, dtype=np.uint8)
+        
+        dqn.epsilon = epsilon_by_episode(ep)
+        
+        prev_info = {"x_pos": 0, "coins": 0, "score": 0, "life": 2}
+        stagnation_counter = 0
+        ep_reward = 0
+        
         while not done:
-            action = dqn.take_action(state, deterministic=False)
-            next_state, env_reward, done, info = env.step(action)
-
-            # update stagnation first (used for cumulative penalty and early stop)
-            if info.get("x_pos", 0) == prev_info.get("x_pos", 0):
-                stagnation += 1
-                if stagnation >= MAX_STAGNATION_STEPS:
-                    done = True
+            # 選擇動作
+            action = dqn.take_action(state_np, deterministic=False)
+            
+            # 執行動作
+            next_state, reward, done, info = env.step(action)
+            next_state_np = np.array(next_state, dtype=np.uint8)
+            
+            # 處理 Reward Shaping
+            # 計算 stagnation
+            x_pos = info.get("x_pos", 0)
+            if x_pos == prev_info.get("x_pos", 0):
+                stagnation_counter += 1
             else:
-                stagnation = 0
+                stagnation_counter = 0
+            
+            # 使用你的 reward.py
+            r_shaped = shaped_reward(info, reward, prev_info, stagnation_counter)
+            prev_info = info
+            
+            # 存入記憶體 (存 uint8)
+            memory.push(state_np, action, r_shaped, next_state_np, done)
+            
+            state_np = next_state_np
+            ep_reward += reward
 
-            # shaped reward (with cumulative stagnation penalty)
-            r = shaped_reward(info, env_reward, prev_info, stagnation)
-
-            ep_env_reward += float(env_reward)
-            ep_shaped_reward += float(r)
-
-            prev_info = dict(info)
-
-            next_state_proc = np.array(next_state).astype(np.float32) / 255.0
-
-            memory.push(state, action, r, next_state_proc, done)
-            state = next_state_proc
-
-            if len(memory) >= BATCH_SIZE:
+            # 開始訓練
+            if len(memory) > 2000: # 稍微累積一點資料再練
                 batch = memory.sample(BATCH_SIZE)
                 state_dict = {
                     "states": batch[0],
@@ -222,53 +183,24 @@ def main():
                     "dones": batch[4],
                 }
                 dqn.train_per_step(state_dict)
-                global_step += 1
 
-            if TRAIN_RENDER:
-                env.render()
+        # Log
+        if ep % 10 == 0:
+            print(f"Ep {ep} | Reward: {ep_reward:.1f} | Epsilon: {dqn.epsilon:.3f} | Mem: {len(memory)}")
 
-        # periodic save
-        if effective_ep % SAVE_EVERY == 0:
-            ckpt_path = os.path.join(SAVE_DIR, f"ep_{effective_ep}.pth")
-            torch.save(dqn.q_net.state_dict(), ckpt_path)
-
-        # periodic evaluation (with optional video)
-        if effective_ep % EVAL_INTERVAL == 0:
-            eval_stats = run_eval_episode(dqn, effective_ep)
-            print(
-                f"[EVAL ep={effective_ep}] steps={eval_stats['steps']} "
-                f"env_reward={eval_stats['total_env_reward']:.1f} "
-                f"shaped_reward={eval_stats['total_shaped_reward']:.1f} "
-            )
-
-            # keep best
-            if eval_stats["total_env_reward"] > best_eval_score:
-                best_eval_score = eval_stats["total_env_reward"]
-
-                # 1) 先刪掉舊的 best_*.pth
-                for old in glob.glob(os.path.join(SAVE_DIR, "best_*.pth")):
-                    try:
-                        os.remove(old)
-                    except OSError:
-                        pass
-
-                # 2) 存新的 best_{episode}.pth（episode 用「實際總回合」命名，下面第3點會處理 offset）
-                best_tag_path = os.path.join(SAVE_DIR, f"best_{effective_ep}.pth")
-                torch.save(dqn.q_net.state_dict(), best_tag_path)
-
-                # 3) 同步存一份固定檔名 best.pth，方便下次 RESUME
-                best_path = os.path.join(SAVE_DIR, "best.pth")
-                torch.save(dqn.q_net.state_dict(), best_path)
-
-                print(f"[BEST] new best saved: {best_tag_path}")
-
-        print(
-            f"[TRAIN ep={ep}] eps={dqn.epsilon:.3f} "
-            f"env_reward={ep_env_reward:.1f} shaped_reward={ep_shaped_reward:.1f}"
-        )
+        # Save & Eval
+        if ep % SAVE_EVERY == 0:
+            torch.save(dqn.q_net.state_dict(), os.path.join(SAVE_DIR, "latest.pth"))
+        
+        if ep % EVAL_INTERVAL == 0:
+            score, steps = run_eval(dqn, ep)
+            print(f"[EVAL] Ep {ep} Score: {score:.1f}, Steps: {steps}")
+            if score > best_score:
+                best_score = score
+                torch.save(dqn.q_net.state_dict(), os.path.join(SAVE_DIR, "best.pth"))
+                print(f"New Best Model Saved! Score: {score}")
 
     env.close()
-
 
 if __name__ == "__main__":
     main()
