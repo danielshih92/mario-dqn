@@ -59,7 +59,7 @@ def stagnation_penalty_reward(dx, reward, stagnation_count: int = 0,
     return r
 
 def forward_jump_reward(info, reward, prev_info, dx,
-                        jump_bonus: float = 0.03, # 可以稍微調高一點點，例如 0.05
+                        jump_bonus: float = 0.05, # 可以稍微調高一點點，例如 0.05
                         fall_penalty: float = 0.01,
                         dy_clip: float = 6.0):
     """Reward upward motion only if moving forward; penalize falling when stuck."""
@@ -85,7 +85,7 @@ def coin_reward(info, reward, prev_info, coin_weight: float = 2.0):
     dcoins = coins - pcoins
     return reward + coin_weight * dcoins
 
-def score_reward(info, reward, prev_info, score_weight: float = 0.05):
+def score_reward(info, reward, prev_info, score_weight: float = 0.1):
     """Small bonus for increasing in-game score (often enemies/items)."""
     score = float(_get(info, "score", 0))
     pscore = float(_get(prev_info, "score", score))

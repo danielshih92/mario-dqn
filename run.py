@@ -11,6 +11,7 @@ import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
 from gym.wrappers import StepAPICompatibility
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
+from gym.wrappers import FrameStack, GrayScaleObservation, ResizeObservation
 
 from utils import preprocess_frame
 from reward import shaped_reward
@@ -61,15 +62,18 @@ REDUCED_MOVEMENT = [
 
 def make_env():
     env = gym_super_mario_bros.make(ENV_ID)
-
-    # Unwrap TimeLimit if present (StepAPICompatibility expects older API)
     if isinstance(env, gym.wrappers.TimeLimit):
         env = env.env
-
     env = StepAPICompatibility(env, new_step_api=False)
-
+    
     movement = REDUCED_MOVEMENT if USE_REDUCED_ACTIONS else SIMPLE_MOVEMENT
     env = JoypadSpace(env, movement)
+
+    # 依序加入處理層
+    env = ResizeObservation(env, (84, 84)) # 縮放
+    env = GrayScaleObservation(env, keep_dim=False) # 灰階 (H, W)
+    env = FrameStack(env, num_stack=4) # 變成 (4, 84, 84)
+    
     return env
 
 
@@ -136,7 +140,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = make_env()
 
-    obs_shape = (1, 84, 84)
+    obs_shape = (4, 84, 84)
     n_actions = env.action_space.n
 
     dqn = DQN(
@@ -164,8 +168,10 @@ def main():
     for ep in tqdm(range(1, TOTAL_EPISODES + 1), desc="Training"):
         effective_ep = EP_OFFSET + ep
         state = env.reset()
-        state = preprocess_frame(state)
-        state = np.expand_dims(state, axis=0)
+        
+        # 【修改 1】直接轉型 + Normalize，不要呼叫 preprocess_frame
+        state = np.array(state).astype(np.float32) / 255.0
+        state = np.expand_dims(state, axis=0) # 變成 (1, 4, 84, 84)
 
         done = False
         prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
@@ -196,7 +202,7 @@ def main():
 
             prev_info = dict(info)
 
-            next_state_proc = preprocess_frame(next_state)
+            next_state_proc = np.array(next_state).astype(np.float32) / 255.0
             next_state_proc = np.expand_dims(next_state_proc, axis=0)
 
             memory.push(state, action, r, next_state_proc, done)

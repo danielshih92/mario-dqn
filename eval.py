@@ -3,60 +3,65 @@ import os
 import torch
 from tqdm import tqdm
 
+import gym
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
+from gym.wrappers import StepAPICompatibility, ResizeObservation, GrayScaleObservation, FrameStack
 
-from utils import preprocess_frame
+# 必須引入你的模型架構
 from model import CustomCNN
 from DQN import DQN
 
 # ========== Config ===========
-MODEL_PATH = os.path.join("ckpt_test","step_18_reward_536_custom_586.pth")        # 模型權重檔案的存放路徑
+# 請確保這裡指向的是你「重新訓練後」的新模型 (4 channel 版本)
+MODEL_PATH = os.path.join("ckpt_test", "best.pth") 
 
-#env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0')                     # 建立《超級瑪利歐兄弟》的遊戲環境(第1個世界的第1關)
+# 必須跟訓練時 (run.py) 的設定完全一致
+ENV_ID = 'SuperMarioBros-1-1-v0'
 
-# SIMPLE_MOVEMENT可自行定義 以下為自訂範例:
-# SIMPLE_MOVEMENT = [
-#    # ["NOOP"],       # Do nothing.
-#     ["right"],      # Move right.
-#     ["right", "A"], # Move right and jump.
-#     ["right", "B"], # Move right and run.
-#     ["right", "A", "B"], # Move right, run, and jump.
-#    # ["A"],          # Jump straight up.
-#     ["left"],       # Move left.
-#     ["left", "A"], # Move right and jump.
-#     ["left", "B"], # Move right and run.
-#     ["left", "A", "B"], # Move right, run, and jump.
-# ]
+# 定義簡化動作 (跟 run.py 一模一樣)
+USE_REDUCED_ACTIONS = True
+REDUCED_MOVEMENT = [
+    ["NOOP"],
+    ["right"],
+    ["right", "A"],
+    ["right", "B"],
+    ["right", "A", "B"],
+]
 
-#env = JoypadSpace(env, SIMPLE_MOVEMENT) 
+def make_env():
+    env = gym_super_mario_bros.make(ENV_ID)
+    if isinstance(env, gym.wrappers.TimeLimit):
+        env = env.env
+    env = StepAPICompatibility(env, new_step_api=False)
 
-import gym
-from gym.wrappers import StepAPICompatibility
+    # 設定動作空間
+    movement = REDUCED_MOVEMENT if USE_REDUCED_ACTIONS else SIMPLE_MOVEMENT
+    env = JoypadSpace(env, movement)
 
-# 1) make（這裡可能會自動包 TimeLimit）
-env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0')
+    # === 關鍵修改：加入跟訓練時一樣的 Wrappers ===
+    env = ResizeObservation(env, (84, 84))
+    env = GrayScaleObservation(env, keep_dim=False)
+    env = FrameStack(env, num_stack=4)  # 變成 (4, 84, 84)
+    # ==========================================
+    
+    return env
 
-# 2) 🔑 拆掉 TimeLimit（不拆一定炸 expected 5 got 4）
-if isinstance(env, gym.wrappers.TimeLimit):
-    env = env.env
+# ... Config ...
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 3) 固定成舊 step API（回 4-tuple）
-env = StepAPICompatibility(env, output_truncation_bool=False)
+# 【修改】輸入通道變為 4
+OBS_SHAPE = (4, 84, 84) 
 
-# 4) 再包 JoypadSpace
-env = JoypadSpace(env, SIMPLE_MOVEMENT)
+# 計算動作數量
+dummy_env = make_env()
+N_ACTIONS = dummy_env.action_space.n
+dummy_env.close()
 
-print("Final env:", env)
-
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")       # 檢查是否有可用的 GPU，否則使用 CPU 作為運算設備
-OBS_SHAPE = (1, 84, 84)                                                     # 遊戲畫面轉換為 (1, 84, 84) 的灰階圖像
-N_ACTIONS = len(SIMPLE_MOVEMENT) 
-
-VISUALIZE = True                                                            # 是否在每回合中顯示遊戲畫面
-TOTAL_EPISODES = 10                                                         # 測試回合的總數
+VISUALIZE = True
+TOTAL_EPISODES = 10
+MAX_STEPS = 5000  # 防止卡死
 
 # ========== Initialize DQN =========== 
 dqn = DQN( 
@@ -65,18 +70,19 @@ dqn = DQN(
     action_dim=N_ACTIONS,
     learning_rate=0.0001,  
     gamma=0.99,          
-    epsilon=0.0,                   # 設為 0.0 表示完全利用當下的策略
-    target_update=1000,            # target [Q-net] 更新的頻率
+    epsilon=0.0,
+    target_update=1000,
     device=device
 )
 
 # ========== 載入模型權重 =========== 
 if os.path.exists(MODEL_PATH):
-    try:                                                                  # 檢查模型檔案是否存在：
-        model_weights = torch.load(MODEL_PATH, map_location=device)       #  若存在，嘗試載入模型權重
-        dqn.q_net.load_state_dict(model_weights)                          #    載入成功，應用到模型
-        dqn.q_net.eval()                                                  #    載入失敗，輸出具體的錯誤資訊(錯誤資訊存在e中)
-        print(f"Model loaded successfully from {MODEL_PATH}")             #  若不存在，則FileNotFoundError
+    try:
+        print(f"Loading model from {MODEL_PATH}...")
+        model_weights = torch.load(MODEL_PATH, map_location=device)
+        dqn.q_net.load_state_dict(model_weights)
+        dqn.q_net.eval()
+        print("Model loaded successfully.")
     except Exception as e:
         print(f"Failed to load model weights: {e}")
         raise
@@ -84,36 +90,54 @@ else:
     raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
 
 # ========== Evaluation Loop ===========
+env = make_env()
+
 for episode in range(1, TOTAL_EPISODES + 1):
-    state = env.reset()                                                   # 重置環境到初始狀態，並獲取環境的 state 初始值
-    state = preprocess_frame(state)
-    state = np.expand_dims(state, axis=0)                                 # 新增 channel dimension ( [H, W] to [1, H, W] )
-    state = np.expand_dims(state, axis=0)                                 # 新增 batch dimension ( [1, H, W] to [1, 1, H, W] )
-                                                                          # 符合 CNN 輸入要求：[batch, channels, height, width]
+    state = env.reset() # 這裡出來已經是 LazyFrames (4, 84, 84)
+
+    # 【修改】處理 State：轉為 numpy -> float -> normalize -> 增加 batch 維度
+    state = np.array(state).astype(np.float32) / 255.0
+    state = np.expand_dims(state, axis=0) # (1, 4, 84, 84)
+
     done = False
     total_reward = 0
+    steps = 0
+    
+    # 增加卡關檢測 (避免負分刷到底)
+    prev_x = 0
+    stagnation = 0
+    
+    while not done and steps < MAX_STEPS:
+        # 轉 Tensor
+        state_tensor = torch.tensor(state, dtype=torch.float32, device=device)
+        
+        with torch.no_grad():
+            action_probs = torch.softmax(dqn.q_net(state_tensor), dim=1)
+            action = torch.argmax(action_probs, dim=1).item()
 
-    while not done:
-        # Take action using the trained policy
-        state_tensor = torch.tensor(state, dtype=torch.float32, device=device)    # 將 NumPy 格式的 state 轉換為 PyTorch 的 tensor 格式
-        with torch.no_grad():                                                       
-            action_probs = torch.softmax(dqn.q_net(state_tensor), dim=1)          # 使用訓練好的 [Q-net] 計算當前狀態的動作分數，並透過 Softmax 轉換為動作機率分佈，輸出範圍為[0,1]，總合為1            
-                                                                                                                                            
-            action = torch.argmax(action_probs, dim=1).item()                     # 選擇機率最高的動作作為當下策略的 action
-        next_state, reward, done, info = env.step(action)                         # 根據選擇的 action 與環境互動，獲取 next_state、reward、是否終止
+        next_state, reward, done, info = env.step(action)
 
-        # Preprocess next state
-        next_state = preprocess_frame(next_state)
-        next_state = np.expand_dims(next_state, axis=0)                           # 新增 channel dimension
-        next_state = np.expand_dims(next_state, axis=0)                           # 新增 batch dimension
+        # 【修改】處理 Next State
+        next_state = np.array(next_state).astype(np.float32) / 255.0
+        next_state = np.expand_dims(next_state, axis=0) # (1, 4, 84, 84)
 
-        # Accumulate rewards
         total_reward += reward
         state = next_state
+        steps += 1
 
-        if VISUALIZE:                                                             # 如果 VISUALIZE=True，則用 env.render() 顯示環境當下的 state
+        # 簡單的卡關檢測 (如果在同一個 X 座標卡太久就強制結束)
+        x_pos = info.get("x_pos", 0)
+        if x_pos == prev_x:
+            stagnation += 1
+            if stagnation > 500: # 卡 500 步就結束
+                done = True
+        else:
+            stagnation = 0
+        prev_x = x_pos
+
+        if VISUALIZE:
             env.render()
 
-    print(f"Episode {episode}/{TOTAL_EPISODES} - Total Reward: {total_reward}")   # 印出當下的進度 episode/總回合數 和該回合的 total_reward
+    print(f"Episode {episode}/{TOTAL_EPISODES} - Total Reward: {total_reward:.2f} - Steps: {steps}")
 
 env.close()
