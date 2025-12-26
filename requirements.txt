@@ -1,17 +1,35 @@
-# Core numerical stack (pin to numpy < 2.0 for nes-py compatibility)
-numpy==1.26.4
+# version 0.1.0
+# # Core numerical stack (pin to numpy < 2.0 for nes-py compatibility)
+# numpy==1.26.4
 
-# Classic Gym stack (gym-super-mario-bros / nes-py are gym-based)
+# # Classic Gym stack (gym-super-mario-bros / nes-py are gym-based)
+# gym==0.25.2
+
+# # Mario environment
+# nes-py==8.2.1
+# gym-super-mario-bros==7.4.0
+
+# # Utilities
+# opencv-python
+# tqdm
+
+# # Deep learning (Colab usually has torch already, but pin is okay)
+# torch
+
+# version 0.2.0
+# Core numerical stack
+numpy<2.0
+
+# Classic Gym stack
 gym==0.25.2
-
-# Mario environment
-nes-py==8.2.1
 gym-super-mario-bros==7.4.0
+nes-py==8.2.1
 
 # Utilities
 opencv-python
 tqdm
 
-# Deep learning (Colab usually has torch already, but pin is okay)
+# Deep learning & RL
 torch
-
+stable-baselines3[extra]
+shimmy>=0.2.1
