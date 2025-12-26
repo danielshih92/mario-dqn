@@ -44,7 +44,7 @@ MAX_STAGNATION_STEPS = 500
 SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
 SAVE_EVERY = 200               # save checkpoint every N episodes (in addition to best)
 
-EP_OFFSET = 3400 # to keep track of actual episode number when resuming training
+EP_OFFSET = 0 # to keep track of actual episode number when resuming training
 RESUME = False
 RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_3400.pth"
 
@@ -98,6 +98,8 @@ def run_eval_episode(dqn: DQN, episode_idx: int):
     total_env_reward = 0.0
     steps = 0
 
+    MAX_STAGNATION_STEPS = 500
+
     while (not done) and (steps < MAX_EVAL_STEPS):
         # deterministic greedy action
         action = dqn.take_action(state, deterministic=True)
@@ -105,6 +107,8 @@ def run_eval_episode(dqn: DQN, episode_idx: int):
 
         if info.get("x_pos", 0) == prev_info.get("x_pos", 0):
             stagnation += 1
+            if stagnation >= MAX_STAGNATION_STEPS:
+                done = True 
         else:
             stagnation = 0
 

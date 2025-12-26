@@ -44,10 +44,12 @@ def forward_progress_reward(info, reward, prev_info,
         r -= backtrack_penalty * abs(dx)
     return r, dx  # return dx for later use (e.g., forward-jump gating)
 
+# 建議稍微降低 base_penalty，或者像上次建議的加入 grace steps (寬限期)
+# 如果不想改結構，至少把 max_penalty 設低一點，讓他不要因為卡住一秒就絕望
 def stagnation_penalty_reward(dx, reward, stagnation_count: int = 0,
-                              base_penalty: float = 0.04,
-                              growth_per_step: float = 0.08,
-                              max_penalty: float = 1.0):
+                              base_penalty: float = 0.02,  # 從 0.04 降到 0.02
+                              growth_per_step: float = 0.05, # 從 0.08 降到 0.05
+                              max_penalty: float = 0.5):     # 從 1.0 降到 0.5
     """Cumulative penalty when not making horizontal progress (dx==0)."""
     r = reward
     if dx == 0:
@@ -57,7 +59,7 @@ def stagnation_penalty_reward(dx, reward, stagnation_count: int = 0,
     return r
 
 def forward_jump_reward(info, reward, prev_info, dx,
-                        jump_bonus: float = 0.03,
+                        jump_bonus: float = 0.03, # 可以稍微調高一點點，例如 0.05
                         fall_penalty: float = 0.01,
                         dy_clip: float = 6.0):
     """Reward upward motion only if moving forward; penalize falling when stuck."""
@@ -66,7 +68,11 @@ def forward_jump_reward(info, reward, prev_info, dx,
     dy = _clip(y - py, -dy_clip, dy_clip)
 
     r = reward
-    if dy > 0 and dx > 0:
+    
+    # 修正重點：改為 dx >= 0。
+    # 這樣當他撞到水管(dx=0)時，起跳(dy>0)依然會有獎勵，
+    # 這能抵消一部分的 stagnation penalty，誘導他嘗試跳躍。
+    if dy > 0 and dx >= 0: 
         r += jump_bonus * dy
     elif dy < 0 and dx <= 0:
         r -= fall_penalty * abs(dy)
