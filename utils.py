@@ -16,9 +16,6 @@ REDUCED_MOVEMENT = [
     ["right", "A", "B"],
 ]
 
-# If you want a larger action space, you can import SIMPLE_MOVEMENT instead.
-# from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
-
 
 def _unwrap_obs_reset(out):
     # gymnasium reset() returns (obs, info); gym returns obs
@@ -33,11 +30,10 @@ def _unwrap_obs_step(out):
         obs, reward, terminated, truncated, info = out
         done = bool(terminated or truncated)
         return obs, reward, done, info
-    elif isinstance(out, tuple) and len(out) == 4:
+    if isinstance(out, tuple) and len(out) == 4:
         obs, reward, done, info = out
-        return obs, reward, done, info
-    else:
-        raise RuntimeError(f"Unexpected step() output: {type(out)} {out}")
+        return obs, reward, bool(done), info
+    raise RuntimeError(f"Unexpected step() output: {type(out)} {out}")
 
 
 def preprocess_frame(frame, out_size=(84, 84)):
@@ -51,7 +47,7 @@ def preprocess_frame(frame, out_size=(84, 84)):
 class FrameStackEnv(gym.Wrapper):
     """
     - Action repeat (frame-skip): repeat same action N frames
-    - Max pooling over last two frames (common trick in Atari; helps with flicker)
+    - Max pooling over last two frames (helps with flicker)
     - Frame stacking: stack last K processed grayscale frames
     Output obs shape: (K, 84, 84) float32
     """
@@ -76,7 +72,7 @@ class FrameStackEnv(gym.Wrapper):
         last_obs = None
         second_last_obs = None
 
-        for i in range(self.skip):
+        for _ in range(self.skip):
             out = self.env.step(action)
             obs, r, done, info = _unwrap_obs_step(out)
             total_reward += float(r)
@@ -111,15 +107,25 @@ def make_mario_env(
 ):
     """
     Returns an env with:
+      - TimeLimit unwrapped (prevents 5-tuple expectation crash)
       - JoypadSpace (discrete action)
       - FrameSkip + MaxPool + FrameStack
       - Obs: (K,84,84) float32
     """
     env = gym_super_mario_bros.make(env_id)
+
+    # IMPORTANT:
+    # Gym 0.26 TimeLimit expects new step API (5-tuple),
+    # but nes-py / mario env returns old 4-tuple => crash.
+    # So unwrap TimeLimit if present.
+    if isinstance(env, gym.wrappers.TimeLimit):
+        env = env.env
+
     movement = REDUCED_MOVEMENT if reduced_actions else None
     if movement is None:
         from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
         movement = SIMPLE_MOVEMENT
+
     env = JoypadSpace(env, movement)
     env = FrameStackEnv(env, stack_k=stack_k, skip=skip)
     return env
