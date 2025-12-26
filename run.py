@@ -88,15 +88,20 @@ def epsilon_by_episode(ep: int) -> float:
 
 @torch.no_grad()
 def run_eval_episode(dqn: DQN, episode_idx: int):
+    # 這裡的 make_env 已經包含了 FrameStack, Resize, GrayScale
     env = make_env()
-    frames = []
+    
+    # 這裡出來的 state 已經是 LazyFrames (4, 84, 84)
     state = env.reset()
     done = False
     prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
     stagnation = 0
 
-    state = preprocess_frame(state)
-    state = np.expand_dims(state, axis=0)
+    # 【修正 1】移除 preprocess_frame，改為直接轉型 + Normalize
+    state = np.array(state).astype(np.float32) / 255.0
+    
+    # 注意：這裡不需要 expand_dims 變成 (1, 4, 84, 84)
+    # 因為你的 DQN.take_action 裡面已經有 .unsqueeze(0) 會幫你加 Batch 維度
 
     total_reward = 0.0
     total_env_reward = 0.0
@@ -122,8 +127,9 @@ def run_eval_episode(dqn: DQN, episode_idx: int):
 
         prev_info = dict(info)
 
-        next_state = preprocess_frame(next_state)
-        next_state = np.expand_dims(next_state, axis=0)
+        # 【修正 2】移除 preprocess_frame，改為直接轉型 + Normalize
+        next_state = np.array(next_state).astype(np.float32) / 255.0
+        
         state = next_state
         steps += 1
 
