@@ -65,8 +65,7 @@ def make_env(env_id, rank, seed=0):
         
         # 3. 使用 Gymnasium Wrappers
         env = SkipFrame(env, skip=4)
-        # 【修正】這裡改成 GrayscaleObservation (小寫 s)
-        env = GrayscaleObservation(env, keep_dim=True)
+        env = GrayScaleObservation(env, keep_dim=True)
         env = ResizeObservation(env, (84, 84))
         
         env = Monitor(env)
