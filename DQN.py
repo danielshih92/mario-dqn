@@ -57,7 +57,7 @@ class DQN:
         if (not deterministic) and (np.random.rand() < self.epsilon):
             return np.random.randint(self.action_dim)
 
-        state_x = T.from_numpy(state).float().to(self.device)
+        state_x = T.from_numpy(state).float().unsqueeze(0).to(self.device)
 
         with T.no_grad():
             q_values = self.q_net(state_x)  # shape: [1, action_dim]

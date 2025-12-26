@@ -171,7 +171,6 @@ def main():
         
         # 【修改 1】直接轉型 + Normalize，不要呼叫 preprocess_frame
         state = np.array(state).astype(np.float32) / 255.0
-        state = np.expand_dims(state, axis=0) # 變成 (1, 4, 84, 84)
 
         done = False
         prev_info = {"x_pos": 0, "y_pos": 0, "score": 0, "coins": 0, "time": 400, "flag_get": False, "life": 3}
