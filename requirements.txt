@@ -20,10 +20,14 @@
 # Core numerical stack
 numpy<2.0
 
-# Classic Gym stack
+# Classic Gym stack (Old)
 gym==0.25.2
 gym-super-mario-bros==7.4.0
 nes-py==8.2.1
+
+# New Standard (for SB3 compatibility)
+gymnasium==0.29.1
+shimmy>=0.2.1
 
 # Utilities
 opencv-python
@@ -32,4 +36,3 @@ tqdm
 # Deep learning & RL
 torch
 stable-baselines3[extra]
-shimmy>=0.2.1
