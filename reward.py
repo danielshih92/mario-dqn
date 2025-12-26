@@ -44,22 +44,16 @@ def forward_progress_reward(info, reward, prev_info,
         r -= backtrack_penalty * abs(dx)
     return r, dx  # return dx for later use (e.g., forward-jump gating)
 
-# 建議稍微降低 base_penalty，或者像上次建議的加入 grace steps (寬限期)
-# 如果不想改結構，至少把 max_penalty 設低一點，讓他不要因為卡住一秒就絕望
-def stagnation_penalty_reward(dx, reward, stagnation_count: int = 0,
-                              base_penalty: float = 0.02,  # 從 0.04 降到 0.02
-                              growth_per_step: float = 0.05, # 從 0.08 降到 0.05
-                              max_penalty: float = 0.5):     # 從 1.0 降到 0.5
-    """Cumulative penalty when not making horizontal progress (dx==0)."""
+def stagnation_penalty_reward(dx, reward,
+                              stagnation_penalty: float = 0.08):
+    """Harsh penalty when not making horizontal progress (dx==0)."""
     r = reward
     if dx == 0:
-        penalty = base_penalty + growth_per_step * max(0, int(stagnation_count))
-        penalty = min(penalty, max_penalty)
-        r -= penalty
+        r -= stagnation_penalty
     return r
 
 def forward_jump_reward(info, reward, prev_info, dx,
-                        jump_bonus: float = 0.05, # 可以稍微調高一點點，例如 0.05
+                        jump_bonus: float = 0.03,
                         fall_penalty: float = 0.01,
                         dy_clip: float = 6.0):
     """Reward upward motion only if moving forward; penalize falling when stuck."""
@@ -68,11 +62,7 @@ def forward_jump_reward(info, reward, prev_info, dx,
     dy = _clip(y - py, -dy_clip, dy_clip)
 
     r = reward
-    
-    # 修正重點：改為 dx >= 0。
-    # 這樣當他撞到水管(dx=0)時，起跳(dy>0)依然會有獎勵，
-    # 這能抵消一部分的 stagnation penalty，誘導他嘗試跳躍。
-    if dy > 0 and dx >= 0: 
+    if dy > 0 and dx > 0:
         r += jump_bonus * dy
     elif dy < 0 and dx <= 0:
         r -= fall_penalty * abs(dy)
@@ -85,7 +75,7 @@ def coin_reward(info, reward, prev_info, coin_weight: float = 2.0):
     dcoins = coins - pcoins
     return reward + coin_weight * dcoins
 
-def score_reward(info, reward, prev_info, score_weight: float = 0.1):
+def score_reward(info, reward, prev_info, score_weight: float = 0.002):
     """Small bonus for increasing in-game score (often enemies/items)."""
     score = float(_get(info, "score", 0))
     pscore = float(_get(prev_info, "score", score))
@@ -99,8 +89,8 @@ def time_penalty_reward(reward, per_step_penalty: float = 0.02):
     return reward - per_step_penalty
 
 def damage_death_penalty_reward(info, reward, prev_info,
-                                life_drop_penalty: float = 15.0,
-                                status_drop_penalty: float = 10.0):
+                                life_drop_penalty: float = 50.0,
+                                status_drop_penalty: float = 25.0):
     """Heavily punish getting hurt or losing a life."""
     r = reward
 
@@ -128,7 +118,7 @@ def final_flag_reward(info, reward, flag_bonus: float = 500.0):
     flag_get = bool(_get(info, "flag_get", False))
     return reward + (flag_bonus if flag_get else 0.0)
 
-def shaped_reward(info, env_reward, prev_info, stagnation_count: int = 0):
+def shaped_reward(info, env_reward, prev_info):
     """Apply all shaping in a single call (aggressive, fast-clear)."""
     r = float(env_reward)
 
@@ -136,7 +126,7 @@ def shaped_reward(info, env_reward, prev_info, stagnation_count: int = 0):
     r, dx = forward_progress_reward(info, r, prev_info)
 
     # 2) Break pipe-stuck behavior
-    r = stagnation_penalty_reward(dx, r, stagnation_count)
+    r = stagnation_penalty_reward(dx, r)
 
     # 3) Encourage forward jump, not pogo jumping
     r = forward_jump_reward(info, r, prev_info, dx)
