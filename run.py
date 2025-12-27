@@ -32,7 +32,7 @@ TOTAL_EPISODES = 2000
 MAX_STEPS_PER_EP = 5000        # safety cap
 
 # epsilon schedule (fast decay)
-EPS_START = 0.05 #1.0
+EPS_START = 0.015 #1.0 0.05
 EPS_END = 0.01 #0.05
 EPS_DECAY_EPISODES = 200       # decay quickly to reduce training time
 
@@ -40,16 +40,16 @@ EPS_DECAY_EPISODES = 200       # decay quickly to reduce training time
 MAX_STAGNATION_STEPS = 400
 
 # evaluation
-EVAL_INTERVAL = 50
+EVAL_INTERVAL = 25
 MAX_EVAL_STEPS = 5000
 
 # checkpoints (Google Drive path)
-SAVE_DIR = "/content/drive/MyDrive/mario/ckpt_r2"
-SAVE_EVERY = 200               # periodic checkpoint
+SAVE_DIR = "/content/drive/MyDrive/mario/ckpt_r3"
+SAVE_EVERY = 100               # periodic checkpoint
 BEST_NAME = "best.pth"
 
 RESUME = True
-RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_400.pth"
+RESUME_PATH = "/content/drive/MyDrive/mario/ckpt_r2/best_700.pth"
 
 
 def epsilon_by_episode(ep: int) -> float:
@@ -121,7 +121,7 @@ def main():
     if RESUME and os.path.exists(RESUME_PATH):
         print(f"[RESUME] loading from {RESUME_PATH}")
         agent.load(RESUME_PATH)
-        agent.epsilon = 0.2
+        agent.epsilon = EPS_START
 
     memory = ReplayMemory(MEMORY_SIZE)
     os.makedirs(SAVE_DIR, exist_ok=True)
