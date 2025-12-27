@@ -32,8 +32,8 @@ TOTAL_EPISODES = 2000
 MAX_STEPS_PER_EP = 5000        # safety cap
 
 # epsilon schedule (fast decay)
-EPS_START = 1.0
-EPS_END = 0.05
+EPS_START = 0.05 #1.0
+EPS_END = 0.01 #0.05
 EPS_DECAY_EPISODES = 200       # decay quickly to reduce training time
 
 # early stop if stuck
@@ -44,12 +44,12 @@ EVAL_INTERVAL = 50
 MAX_EVAL_STEPS = 5000
 
 # checkpoints (Google Drive path)
-SAVE_DIR = "/content/drive/MyDrive/mario/ckpt"
+SAVE_DIR = "/content/drive/MyDrive/mario/ckpt_r2"
 SAVE_EVERY = 200               # periodic checkpoint
 BEST_NAME = "best.pth"
 
-RESUME = False
-RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best.pth"
+RESUME = True
+RESUME_PATH = "/content/drive/MyDrive/mario/ckpt/best_400.pth"
 
 
 def epsilon_by_episode(ep: int) -> float:
